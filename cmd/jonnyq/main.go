@@ -49,13 +49,14 @@ func main() {
 	reg.Register(tools.NewFetchTool(cfg.FetchConcurrency, cfg.FetchTimeoutSec))
 	reg.Register(&tools.PDFTool{WorkDir: workDir, MaxPages: cfg.PDFMaxPages, DPI: cfg.PDFDPI})
 	reg.Register(&tools.PicTool{WorkDir: workDir})
-	reg.Register(&tools.RunCommandTool{WorkDir: workDir})
+	runCommandTool := &tools.RunCommandTool{WorkDir: workDir, TimeoutSec: cfg.RunCommandTimeoutSec}
+	reg.Register(runCommandTool)
 	reg.Register(&tools.SkillTool{Paths: cfg.SkillPaths})
 
 	contextFile := ".context"
 	ag := agent.New(provider, cfg.Model, reg, cfg.Thinking, cfg.ContextSize, w, cfg.SkillPaths, contextFile)
 
-	r := repl.New(cfg, ag, w)
+	r := repl.New(cfg, ag, w, runCommandTool)
 	if err := r.Run(context.Background()); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)

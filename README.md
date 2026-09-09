@@ -94,6 +94,7 @@ go test ./...
 | `-fetch-timeout-sec` | `JONNYQ_FETCH_TIMEOUT_SEC` | `30` | timeout วินาที |
 | `-pdf-max-pages` | `JONNYQ_PDF_MAX_PAGES` | `50` | จำนวนหน้า PDF สูงสุด |
 | `-pdf-dpi` | `JONNYQ_PDF_DPI` | `150` | DPI ตอน render PDF เป็นภาพ |
+| `-run-command-timeout-sec` | `JONNYQ_RUN_COMMAND_TIMEOUT_SEC` | `300` | timeout ของ `run_command` วินาที (ปรับตอนรันได้ด้วย `/run_command_timeout`) |
 | `-skill-path` | `JONNYQ_SKILL_PATH` | (ว่าง) | path ของ skill คั่นด้วย `;` ได้หลายอัน |
 | `-thinking` | `JONNYQ_THINKING` | `true` | เปิด/ปิด model thinking |
 
@@ -116,12 +117,13 @@ JONNYQ_MODEL=llama3 ./jonnyq
 | `/list_model` | แสดงรายการ model ที่มีจาก provider ปัจจุบัน |
 | `/context <size>` | ตั้ง context size |
 | `/think <true\|false>` | เปิด/ปิด thinking |
+| `/run_command_timeout <seconds>` | ตั้ง timeout ของ `run_command` (วินาที) ที่กำลังรันอยู่ |
 | `/coding` | automate เขียนโค้ดจาก `requirements.md` ทั้งหมด พร้อม compile/test/verify ทีละ task ใน `.progress` |
 | `/exit` | ออกจากโปรแกรม |
 
 ถ้ายังไม่ได้ตั้ง `-model`/`JONNYQ_MODEL` โปรแกรมจะแจ้งเตือนก่อนแสดง prompt และรับได้เฉพาะ slash command เท่านั้น จนกว่าจะสั่ง `/model <name>`
 
-กด **Ctrl-C** เพื่อยกเลิกรอบการทำงานปัจจุบันได้โดยไม่ต้องปิดโปรแกรม
+กด **Ctrl-C** เพื่อยกเลิกรอบการทำงานปัจจุบันได้โดยไม่ต้องปิดโปรแกรม รวมถึงระหว่างที่ `/coding` กำลังทำงานอยู่ด้วย (ยกเลิกได้ทั้ง turn ปัจจุบันของ agent และ process ของ `run_command` ที่กำลังรันอยู่)
 
 ## โครงสร้างโปรเจกต์
 

@@ -13,17 +13,18 @@ import (
 const envPrefix = "JONNYQ_"
 
 const (
-	DefaultProvider           = "ollama:http://localhost:11434"
-	DefaultContextSize        = 16348
-	DefaultOutputFile         = "output.txt"
-	DefaultSearxngMaxResults  = 10
-	DefaultSearxngConcurrency = 4
-	DefaultSearxngTimeoutSec  = 30
-	DefaultFetchConcurrency   = 5
-	DefaultFetchTimeoutSec    = 30
-	DefaultPDFMaxPages        = 50
-	DefaultPDFDPI             = 150
-	DefaultThinking           = true
+	DefaultProvider             = "ollama:http://localhost:11434"
+	DefaultContextSize          = 16348
+	DefaultOutputFile           = "output.txt"
+	DefaultSearxngMaxResults    = 10
+	DefaultSearxngConcurrency   = 4
+	DefaultSearxngTimeoutSec    = 30
+	DefaultFetchConcurrency     = 5
+	DefaultFetchTimeoutSec      = 30
+	DefaultPDFMaxPages          = 50
+	DefaultPDFDPI               = 150
+	DefaultThinking             = true
+	DefaultRunCommandTimeoutSec = 300
 )
 
 // Config holds all runtime settings for jonnyq.
@@ -45,6 +46,8 @@ type Config struct {
 
 	PDFMaxPages int
 	PDFDPI      int
+
+	RunCommandTimeoutSec int
 
 	SkillPaths []string
 
@@ -113,6 +116,7 @@ func Load(args []string) (*Config, error) {
 	fetchTimeoutSec := fs.Int("fetch-timeout-sec", envInt("FETCH_TIMEOUT_SEC", DefaultFetchTimeoutSec), "web_fetch timeout seconds")
 	pdfMaxPages := fs.Int("pdf-max-pages", envInt("PDF_MAX_PAGES", DefaultPDFMaxPages), "max PDF pages to read")
 	pdfDPI := fs.Int("pdf-dpi", envInt("PDF_DPI", DefaultPDFDPI), "PDF render DPI")
+	runCommandTimeoutSec := fs.Int("run-command-timeout-sec", envInt("RUN_COMMAND_TIMEOUT_SEC", DefaultRunCommandTimeoutSec), "run_command timeout seconds")
 	skillPath := fs.String("skill-path", skillPathStr, "semicolon-separated skill directories")
 	thinking := fs.Bool("thinking", envBool("THINKING", DefaultThinking), "enable model thinking")
 
@@ -135,6 +139,7 @@ func Load(args []string) (*Config, error) {
 	c.FetchTimeoutSec = *fetchTimeoutSec
 	c.PDFMaxPages = *pdfMaxPages
 	c.PDFDPI = *pdfDPI
+	c.RunCommandTimeoutSec = *runCommandTimeoutSec
 	c.Thinking = *thinking
 	if *skillPath != "" {
 		for _, p := range strings.Split(*skillPath, ";") {

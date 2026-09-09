@@ -10,14 +10,20 @@ import (
 	"jonnyq/internal/llm"
 )
 
-// commandTimeout bounds a single run_command call so a hung process can't
-// block the REPL forever; Ctrl-C (which cancels ctx) still wins earlier.
-const commandTimeout = 5 * time.Minute
+// DefaultCommandTimeoutSec bounds a single run_command call so a hung
+// process can't block the REPL forever; Ctrl-C (which cancels ctx) still
+// wins earlier. It's the fallback used when TimeoutSec is left unset.
+const DefaultCommandTimeoutSec = 300
 
 // RunCommandTool executes a shell command. No confirmation prompt is shown
 // (by design, per user request) but commands matching a fixed denylist of
-// known-destructive patterns are refused outright.
-type RunCommandTool struct{ WorkDir string }
+// known-destructive patterns are refused outright. TimeoutSec may be
+// changed at runtime (e.g. by the /run_command_timeout slash command); it
+// is read fresh on every call.
+type RunCommandTool struct {
+	WorkDir    string
+	TimeoutSec int
+}
 
 func (t *RunCommandTool) Spec() llm.ToolSpec {
 	return llm.ToolSpec{
@@ -42,7 +48,13 @@ func (t *RunCommandTool) Call(ctx context.Context, args map[string]any) (string,
 		return "", fmt.Errorf("refused to run: command %s", reason)
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, commandTimeout)
+	timeoutSec := t.TimeoutSec
+	if timeoutSec <= 0 {
+		timeoutSec = DefaultCommandTimeoutSec
+	}
+	timeout := time.Duration(timeoutSec) * time.Second
+
+	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(cctx, "bash", "-c", command)
@@ -53,8 +65,8 @@ func (t *RunCommandTool) Call(ctx context.Context, args map[string]any) (string,
 	err := cmd.Run()
 
 	result := out.String()
-	if cctx.Err() != nil {
-		return result, fmt.Errorf("command timed out after %s", commandTimeout)
+	if cctx.Err() != nil && ctx.Err() == nil {
+		return result, fmt.Errorf("command timed out after %s", timeout)
 	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
