@@ -90,6 +90,7 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 		return fmt.Errorf("no model set; use /model <name> first")
 	}
 	start := time.Now()
+	a.UI.NewTurn()
 	systemMsg := a.buildSystemMessage()
 	a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: userInput})
 
@@ -155,11 +156,11 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 		})
 
 		for _, tc := range pendingCalls {
-			a.UI.ToolCall(fmt.Sprintf("[tool] %s(%s)", tc.Name, tc.Arguments))
+			a.UI.ToolCall(fmt.Sprintf("%s(%s)", tc.Name, tc.Arguments))
 			result, err := a.Tools.Call(ctx, tc.Name, tc.Arguments)
 			if err != nil {
 				result = "error: " + err.Error()
-				a.UI.ToolCall(fmt.Sprintf("[tool error] %s: %v", tc.Name, err))
+				a.UI.ToolCall(fmt.Sprintf("%s: error: %v", tc.Name, err))
 			}
 			a.History = append(a.History, llm.Message{
 				Role:       llm.RoleTool,

@@ -28,6 +28,26 @@ func TestRunCommandDefaultTimeoutFallback(t *testing.T) {
 	}
 }
 
+// TestRunCommandTimeoutKillsBackgroundedGrandchild reproduces the bug where
+// a shell command backgrounds a subprocess (`cmd &`): killing only the
+// direct bash child leaves that grandchild running, and since it inherited
+// the stdout/stderr pipe, exec's Wait() blocks until the grandchild exits
+// on its own - ignoring the configured timeout entirely. The fix kills the
+// whole process group on timeout.
+func TestRunCommandTimeoutKillsBackgroundedGrandchild(t *testing.T) {
+	rc := &RunCommandTool{WorkDir: t.TempDir(), TimeoutSec: 1}
+	start := time.Now()
+	out, err := rc.Call(context.Background(), map[string]any{"command": "sleep 10 & sleep 10"})
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timeout error, got out=%q err=%v", out, err)
+	}
+	if elapsed > 4*time.Second {
+		t.Errorf("expected both the foreground and backgrounded sleep to be killed around 1s, took %s", elapsed)
+	}
+}
+
 func TestRunCommandContextCancelDoesNotReportAsTimeout(t *testing.T) {
 	rc := &RunCommandTool{WorkDir: t.TempDir(), TimeoutSec: 300}
 	ctx, cancel := context.WithCancel(context.Background())

@@ -7,7 +7,7 @@ Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, �
 - REPL loop: รับ prompt ต่อเนื่องจนกว่าจะสั่ง `/exit`
 - รองรับ 2 provider: `ollama` (native `/api/chat`, ได้ metric เวลาจริงจาก provider) และ `openai` (OpenAI-compatible `/v1/chat/completions` แบบ SSE)
 - Tools ให้ model เรียกใช้: `read_file`, `write_file`, `edit_file`, `create_folder`, `web_search`, `web_fetch`, `read_pdf`, `read_pic`, `run_command`, `read_skill`
-- แสดงผลแบบมีสี: ขาว=prompt, เขียว=thinking, แดง=tool call, เหลือง=answer, เทา=metric ท้ายรอบ พร้อม log ไฟล์แบบ plain text (`output.txt`)
+- แสดงผลแบบมีสี: ขาว=prompt, เขียว=thinking, แดง=tool call, เหลือง=answer, เทา=metric ท้ายรอบ — แต่ละ section (thinking/tool call/answer) มีบรรทัดว่างคั่นและหัวข้อตัวหนาสีสดกำกับไว้ (เช่น **Thinking**, **Tool call**, **Answer**) พร้อม log ไฟล์แบบ plain text (`output.txt`)
 - เก็บ context การทำงานลงไฟล์ `.context` และ compact อัตโนมัติทุก 20 รอบ
 - คำสั่ง `/coding` แตก `requirements.md` เป็น task checklist ในไฟล์ `.progress` แล้วไล่ทำทีละ task พร้อม verify
 

@@ -107,11 +107,14 @@ func TestRunTurnExecutesToolCallThenFinalAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := string(logData)
-	if !strings.Contains(log, "[tool] echo(") {
-		t.Errorf("expected tool call to be logged, got: %s", log)
+	if !strings.Contains(log, "Tool call\necho({\"text\":\"hi\"})") {
+		t.Errorf("expected tool call section header + call to be logged, got: %s", log)
 	}
-	if !strings.Contains(log, "all done") {
-		t.Errorf("expected final answer to be logged, got: %s", log)
+	if !strings.Contains(log, "Answer\nall done") {
+		t.Errorf("expected answer section header + text to be logged, got: %s", log)
+	}
+	if !strings.Contains(log, "\nTool call\n") || !strings.Contains(log, "\nAnswer\n") {
+		t.Errorf("expected blank-line-separated section headers in log, got: %s", log)
 	}
 	if !strings.Contains(log, "token_in=13") || !strings.Contains(log, "token_out=3") || !strings.Contains(log, "total_token=16") {
 		t.Errorf("expected aggregated usage across both provider calls, got: %s", log)

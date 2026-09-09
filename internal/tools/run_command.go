@@ -15,6 +15,12 @@ import (
 // wins earlier. It's the fallback used when TimeoutSec is left unset.
 const DefaultCommandTimeoutSec = 300
 
+// waitDelay is a backstop grace period after the process is killed: if some
+// descendant still holds the stdout/stderr pipe open (e.g. a background job
+// that escaped the process-group kill via setsid), Wait forcibly closes the
+// pipes and returns after this instead of hanging indefinitely.
+const waitDelay = 5 * time.Second
+
 // RunCommandTool executes a shell command. No confirmation prompt is shown
 // (by design, per user request) but commands matching a fixed denylist of
 // known-destructive patterns are refused outright. TimeoutSec may be
@@ -59,6 +65,14 @@ func (t *RunCommandTool) Call(ctx context.Context, args map[string]any) (string,
 
 	cmd := exec.CommandContext(cctx, "bash", "-c", command)
 	cmd.Dir = t.WorkDir
+	configureProcessGroup(cmd)
+	// bash -c runs non-interactively, so a "command &" in the shell string
+	// stays in the same process group by default; killing only cmd.Process
+	// (the default Cancel behavior) would leave it running and holding the
+	// stdout/stderr pipe open, hanging Wait past the timeout. Kill the whole
+	// group instead, with WaitDelay as a backstop for anything that escapes it.
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	cmd.WaitDelay = waitDelay
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
