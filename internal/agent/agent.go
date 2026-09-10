@@ -23,35 +23,38 @@ import (
 // conversation history is summarized and replaced, per spec.
 const compactEvery = 20
 
-// maxToolCallsPerTurn is a runaway-loop safety valve: it caps total tool
-// calls across one user turn even though the spec places no limit on the
-// number of prompt rounds overall.
-const maxToolCallsPerTurn = 50
+// DefaultMaxToolCallsPerTurn is the fallback used when MaxToolCallsPerTurn
+// is left unset (<= 0). It's a runaway-loop safety valve: it caps total
+// tool calls across one user turn even though the spec places no limit on
+// the number of prompt rounds overall.
+const DefaultMaxToolCallsPerTurn = 50
 
 type Agent struct {
-	Provider    llm.Provider
-	Model       string
-	Thinking    bool
-	ContextSize int
-	Tools       *tools.Registry
-	SkillPaths  []string
-	UI          *ui.Writer
-	ContextFile string
+	Provider            llm.Provider
+	Model               string
+	Thinking            bool
+	ContextSize         int
+	MaxToolCallsPerTurn int
+	Tools               *tools.Registry
+	SkillPaths          []string
+	UI                  *ui.Writer
+	ContextFile         string
 
 	History            []llm.Message
 	roundsSinceCompact int
 }
 
-func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool, contextSize int, w *ui.Writer, skillPaths []string, contextFile string) *Agent {
+func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool, contextSize, maxToolCallsPerTurn int, w *ui.Writer, skillPaths []string, contextFile string) *Agent {
 	return &Agent{
-		Provider:    provider,
-		Model:       model,
-		Thinking:    thinking,
-		ContextSize: contextSize,
-		Tools:       reg,
-		SkillPaths:  skillPaths,
-		UI:          w,
-		ContextFile: contextFile,
+		Provider:            provider,
+		Model:               model,
+		Thinking:            thinking,
+		ContextSize:         contextSize,
+		MaxToolCallsPerTurn: maxToolCallsPerTurn,
+		Tools:               reg,
+		SkillPaths:          skillPaths,
+		UI:                  w,
+		ContextFile:         contextFile,
 	}
 }
 
@@ -94,8 +97,13 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 	systemMsg := a.buildSystemMessage()
 	a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: userInput})
 
+	maxToolCalls := a.MaxToolCallsPerTurn
+	if maxToolCalls <= 0 {
+		maxToolCalls = DefaultMaxToolCallsPerTurn
+	}
+
 	var totalUsage llm.Usage
-	remainingToolBudget := maxToolCallsPerTurn
+	remainingToolBudget := maxToolCalls
 	var finalAnswer strings.Builder
 
 	for {
@@ -145,7 +153,7 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 		}
 
 		if len(pendingCalls) > remainingToolBudget {
-			return fmt.Errorf("tool call budget exceeded for this turn (limit %d)", maxToolCallsPerTurn)
+			return fmt.Errorf("tool call budget exceeded for this turn (limit %d)", maxToolCalls)
 		}
 		remainingToolBudget -= len(pendingCalls)
 

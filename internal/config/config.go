@@ -25,6 +25,7 @@ const (
 	DefaultPDFDPI               = 150
 	DefaultThinking             = true
 	DefaultRunCommandTimeoutSec = 300
+	DefaultMaxToolCallsPerTurn  = 50
 )
 
 // Config holds all runtime settings for jonnyq.
@@ -48,6 +49,7 @@ type Config struct {
 	PDFDPI      int
 
 	RunCommandTimeoutSec int
+	MaxToolCallsPerTurn  int
 
 	SkillPaths []string
 
@@ -117,6 +119,7 @@ func Load(args []string) (*Config, error) {
 	pdfMaxPages := fs.Int("pdf-max-pages", envInt("PDF_MAX_PAGES", DefaultPDFMaxPages), "max PDF pages to read")
 	pdfDPI := fs.Int("pdf-dpi", envInt("PDF_DPI", DefaultPDFDPI), "PDF render DPI")
 	runCommandTimeoutSec := fs.Int("run-command-timeout-sec", envInt("RUN_COMMAND_TIMEOUT_SEC", DefaultRunCommandTimeoutSec), "run_command timeout seconds")
+	maxToolCallsPerTurn := fs.Int("max-tool-calls-per-turn", envInt("MAX_TOOL_CALLS_PER_TURN", DefaultMaxToolCallsPerTurn), "max tool calls allowed within a single turn")
 	skillPath := fs.String("skill-path", skillPathStr, "semicolon-separated skill directories")
 	thinking := fs.Bool("thinking", envBool("THINKING", DefaultThinking), "enable model thinking")
 
@@ -140,6 +143,7 @@ func Load(args []string) (*Config, error) {
 	c.PDFMaxPages = *pdfMaxPages
 	c.PDFDPI = *pdfDPI
 	c.RunCommandTimeoutSec = *runCommandTimeoutSec
+	c.MaxToolCallsPerTurn = *maxToolCallsPerTurn
 	c.Thinking = *thinking
 	if *skillPath != "" {
 		for _, p := range strings.Split(*skillPath, ";") {

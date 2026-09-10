@@ -16,6 +16,31 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Thinking != true {
 		t.Errorf("expected thinking default true")
 	}
+	if cfg.RunCommandTimeoutSec != DefaultRunCommandTimeoutSec {
+		t.Errorf("expected default run_command timeout %d, got %d", DefaultRunCommandTimeoutSec, cfg.RunCommandTimeoutSec)
+	}
+	if cfg.MaxToolCallsPerTurn != DefaultMaxToolCallsPerTurn {
+		t.Errorf("expected default max tool calls per turn %d, got %d", DefaultMaxToolCallsPerTurn, cfg.MaxToolCallsPerTurn)
+	}
+}
+
+func TestMaxToolCallsPerTurnFlagAndEnv(t *testing.T) {
+	cfg, err := Load([]string{"-max-tool-calls-per-turn", "10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxToolCallsPerTurn != 10 {
+		t.Errorf("expected flag to set 10, got %d", cfg.MaxToolCallsPerTurn)
+	}
+
+	t.Setenv("JONNYQ_MAX_TOOL_CALLS_PER_TURN", "25")
+	cfg, err = Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxToolCallsPerTurn != 25 {
+		t.Errorf("expected env to set 25, got %d", cfg.MaxToolCallsPerTurn)
+	}
 }
 
 func TestLoadEnvOverridesDefault(t *testing.T) {

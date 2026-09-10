@@ -62,7 +62,7 @@ func newTestAgent(t *testing.T, responses [][]llm.ChatEvent) (*Agent, *echoTool,
 
 	p := &sequenceProvider{responses: responses}
 	ctxFile := filepath.Join(dir, ".context")
-	a := New(p, "test-model", reg, false, 0, w, nil, ctxFile)
+	a := New(p, "test-model", reg, false, 0, 0, w, nil, ctxFile)
 	return a, et, outFile
 }
 

@@ -30,7 +30,7 @@ const helpText = `Slash commands:
   /run_command_timeout <seconds>    set the run_command timeout in seconds
   /prompt <file>                    read a prompt from file and send it, as if typed
   /coding                           run automated coding from requirements.md, tracked in .progress (Ctrl-C cancels)
-  /exit                             exit jonnyq
+  /exit  /bye                       exit jonnyq
 
 Multi-line prompts: end a line with a trailing backslash to continue it on
 the next line, or type """ alone on a line to start a block that runs
@@ -140,7 +140,7 @@ func (r *REPL) handleSlash(ctx context.Context, line string) (bool, error) {
 	case "/?", "/help":
 		r.UI.Plainln(helpText)
 
-	case "/exit":
+	case "/exit", "/bye":
 		return true, nil
 
 	case "/provider":
