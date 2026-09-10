@@ -136,3 +136,21 @@ func TestRunTurnNoModelSet(t *testing.T) {
 		t.Error("expected error when no model is set")
 	}
 }
+
+func TestCodingModeAddsStrictPromptOnlyWhenSet(t *testing.T) {
+	a, _, _ := newTestAgent(t, nil)
+
+	plain := a.buildSystemMessage()
+	if strings.Contains(plain.Content, "AUTONOMOUS CODING MODE") {
+		t.Errorf("system message should not include coding-mode rules by default, got: %s", plain.Content)
+	}
+
+	a.CodingMode = true
+	strict := a.buildSystemMessage()
+	if !strings.Contains(strict.Content, "AUTONOMOUS CODING MODE") {
+		t.Errorf("expected coding-mode rules when CodingMode is set, got: %s", strict.Content)
+	}
+	if !strings.Contains(strict.Content, "run_command in THIS SAME turn") {
+		t.Errorf("expected the verify-before-done rule to be present, got: %s", strict.Content)
+	}
+}

@@ -9,7 +9,8 @@ Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, �
 - Tools ให้ model เรียกใช้: `read_file`, `write_file`, `edit_file`, `create_folder`, `web_search`, `web_fetch`, `read_pdf`, `read_pic`, `run_command`, `read_skill`
 - แสดงผลแบบมีสี: ขาว=prompt, เขียว=thinking, แดง=tool call, เหลือง=answer, เทา=metric ท้ายรอบ — แต่ละ section (thinking/tool call/answer) มีบรรทัดว่างคั่นและหัวข้อตัวหนาสีสดกำกับไว้ (เช่น **Thinking**, **Tool call**, **Answer**) พร้อม log ไฟล์แบบ plain text (`output.txt`)
 - เก็บ context การทำงานลงไฟล์ `.context` และ compact อัตโนมัติทุก 20 รอบ
-- คำสั่ง `/coding` แตก `requirements.md` เป็น task checklist ในไฟล์ `.progress` แล้วไล่ทำทีละ task พร้อม verify
+- คำสั่ง `/coding` แตก `requirements.md` เป็น task checklist ในไฟล์ `.progress` แล้วไล่ทำทีละ task พร้อม verify — รองรับ **incremental coding**: ถ้าแก้/เพิ่ม `requirements.md` แล้วสั่ง `/coding` ซ้ำ จะตรวจพบความเปลี่ยนแปลง (เทียบ hash เก็บไว้ใน `.progress.hash`) แล้วให้ model reconcile `.progress` ก่อน (เพิ่ม task ใหม่/uncheck task เดิมที่ไม่ตรงกับ requirement ที่เปลี่ยน) โดยไม่ต้องเริ่ม plan ใหม่ทั้งหมด
+- ระหว่าง `/coding` ทำงาน ตัว system prompt จะเข้มงวดขึ้น (`AUTONOMOUS CODING MODE`) กำชับว่าห้าม mark task ว่าเสร็จโดยไม่ได้รัน build/test จริงในรอบนั้นแล้วเห็นผลผ่านจริง — เป็นการกำกับผ่าน prompt เท่านั้น ไม่มีการตรวจสอบซ้ำจากฝั่งโปรแกรมเอง จึงยังขึ้นกับความสามารถ/ความซื่อสัตย์ของ model ที่ใช้อยู่
 
 ## ความปลอดภัย (โดยตั้งใจ)
 
@@ -120,7 +121,7 @@ JONNYQ_MODEL=llama3 ./jonnyq
 | `/think <true\|false>` | เปิด/ปิด thinking |
 | `/run_command_timeout <seconds>` | ตั้ง timeout ของ `run_command` (วินาที) ที่กำลังรันอยู่ |
 | `/prompt <file>` | อ่านเนื้อหาไฟล์มาเป็น prompt แล้วส่งเลย เหมือนพิมพ์เอง |
-| `/coding` | automate เขียนโค้ดจาก `requirements.md` ทั้งหมด พร้อม compile/test/verify ทีละ task ใน `.progress` |
+| `/coding` | automate เขียนโค้ดจาก `requirements.md` ทั้งหมด พร้อม compile/test/verify ทีละ task ใน `.progress` (รองรับแก้ `requirements.md` แล้วสั่งซ้ำเพื่อทำต่อแบบ incremental) |
 | `/exit`, `/bye` | ออกจากโปรแกรม |
 
 ถ้ายังไม่ได้ตั้ง `-model`/`JONNYQ_MODEL` โปรแกรมจะแจ้งเตือนก่อนแสดง prompt และรับได้เฉพาะ slash command เท่านั้น จนกว่าจะสั่ง `/model <name>`

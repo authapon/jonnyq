@@ -40,9 +40,30 @@ type Agent struct {
 	UI                  *ui.Writer
 	ContextFile         string
 
+	// CodingMode, when true, appends codingModePrompt to the system message.
+	// /coding sets this for the duration of its run so the model is held to
+	// a much stricter verify-before-done standard than ordinary chat.
+	CodingMode bool
+
 	History            []llm.Message
 	roundsSinceCompact int
 }
+
+// codingModePrompt is appended to the system message while CodingMode is
+// set. It exists because /coding runs unattended across many turns with no
+// human checking each step, so "looks right" is not an acceptable bar - the
+// model must have just proven it with a real, passing command.
+const codingModePrompt = `
+=== AUTONOMOUS CODING MODE ===
+You are working through a task checklist with no human reviewing each step before it's committed. Follow these rules exactly, without exception:
+
+1. A task is done only when it compiles/builds with no errors AND all relevant automated tests pass AND it actually satisfies the requirement. Writing the code is not enough.
+2. Before changing a task's checkbox from "- [ ]" to "- [x]" in .progress, you MUST have actually run the real build and test commands for this project via run_command in THIS SAME turn, and seen their real passing output. Never mark a task done based on an earlier turn's results, based on reasoning about what "should" work, or without running anything at all.
+3. If a verification command fails, fix the underlying problem and re-run it until it genuinely passes before marking the task done. Never mark a task done "with known issues" or "should be fine."
+4. If you don't already know how to build or test this project, find out first (check for a Makefile, package.json, go.mod, Cargo.toml, README, CI config, etc.) rather than guessing or skipping verification.
+5. If a task genuinely has nothing to build or test (e.g. a documentation-only change), say so explicitly in your reply instead of silently marking it done with no verification.
+6. Never state or imply a task is verified, working, or tested unless you have real tool output from this turn proving it.
+`
 
 func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool, contextSize, maxToolCallsPerTurn int, w *ui.Writer, skillPaths []string, contextFile string) *Agent {
 	return &Agent{
@@ -70,6 +91,9 @@ func (a *Agent) buildSystemMessage() llm.Message {
 		for _, s := range skills {
 			fmt.Fprintf(&sb, "- %s: %s\n", s.Name, s.Description)
 		}
+	}
+	if a.CodingMode {
+		sb.WriteString(codingModePrompt)
 	}
 	return llm.Message{Role: llm.RoleSystem, Content: sb.String()}
 }
