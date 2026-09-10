@@ -240,3 +240,58 @@ func TestCodingModeIsResetAfterRun(t *testing.T) {
 		t.Error("expected CodingMode to be reset to false after Run returns")
 	}
 }
+
+// TestRunRetriesStuckTaskWithDiagnosticNote reproduces a failure mode seen
+// in practice: the model claims (in its final answer text) that it already
+// completed and verified a task, but .progress on disk still shows it
+// unchecked - e.g. because an earlier edit_file call silently didn't match,
+// or a write_file rewrite clobbered the checkbox from a stale copy. Run
+// must keep re-picking that same task (never silently accept the model's
+// claim over the actual file), and from the second attempt on on the
+// resent prompt must include a diagnostic note telling the model to
+// investigate instead of repeating the same claim.
+func TestRunRetriesStuckTaskWithDiagnosticNote(t *testing.T) {
+	dir := t.TempDir()
+	reqData := []byte("x")
+	if err := os.WriteFile(filepath.Join(dir, requirementsFile), reqData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [ ] stuck task\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStoredHash(filepath.Join(dir, hashFile), fileHash(reqData)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The model just asserts it's done every time without ever touching
+	// .progress - simulating the observed bug.
+	p := &sequenceProvider{t: t, steps: []step{
+		contentStep("I already completed and verified this task."),
+		contentStep("I already completed and verified this task."),
+		contentStep("I already completed and verified this task."),
+		contentStep("I already completed and verified this task."),
+		contentStep("I already completed and verified this task."),
+	}}
+	ag := newTestAgent(t, dir, p)
+
+	err := Run(context.Background(), ag, ag.UI, dir)
+	if err == nil {
+		t.Fatal("expected an error once the stall limit is reached")
+	}
+	if !strings.Contains(err.Error(), "made no progress") {
+		t.Errorf("expected a stall error, got: %v", err)
+	}
+	if p.calls != maxStallRounds {
+		t.Errorf("expected exactly %d attempts before aborting, got %d", maxStallRounds, p.calls)
+	}
+
+	last := lastUserContent(p.sentReqs[len(p.sentReqs)-1])
+	if !strings.Contains(last, "already attempted") || !strings.Contains(last, "STILL shown as unchecked") {
+		t.Errorf("expected the retry prompt to include the diagnostic note, got: %s", last)
+	}
+	// The very first attempt has nothing to diagnose yet.
+	first := lastUserContent(p.sentReqs[0])
+	if strings.Contains(first, "already attempted") {
+		t.Errorf("did not expect the diagnostic note on the first attempt, got: %s", first)
+	}
+}

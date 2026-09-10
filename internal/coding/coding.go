@@ -171,15 +171,40 @@ func Run(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) err
 		}
 
 		w.Plainln(fmt.Sprintf("[coding] working on: %s", next.text))
+		var retryNote string
+		if stall > 0 {
+			// The same task came back unchecked after a previous attempt.
+			// Left as a plain "work on this task" prompt, models have been
+			// observed to just repeat "I already did this and verified it"
+			// from their own conversation history without noticing that
+			// .progress on disk still shows it unchecked - typically
+			// because an earlier edit_file call silently failed to match
+			// (its old_string didn't exactly match the current line) or a
+			// write_file rewrite of the whole file was based on a stale,
+			// pre-edit copy in the model's context. Point this out
+			// explicitly so the model investigates instead of repeating
+			// the same unverified claim.
+			retryNote = fmt.Sprintf(
+				"Note: this task was already attempted %d time(s) before and is STILL shown as unchecked (\"- [ ]\") in %s right "+
+					"now. Do not assume you already finished it, even if it looks familiar - re-check from scratch: read_file %s "+
+					"and your implementation files to see their real current state, figure out concretely why the checkbox didn't "+
+					"end up set (a common cause: edit_file's old_string must match the line in %s exactly, or a prior write_file "+
+					"rewrote %s from a stale in-memory copy and clobbered the change), and fix it for real this time.\n\n",
+				stall, progressFile, progressFile, progressFile, progressFile,
+			)
+		}
 		prompt := fmt.Sprintf(
-			"Work on this task from %s: %q\n\n"+
+			"%sWork on this task from %s: %q\n\n"+
 				"Implement it, then actually run the real build and test commands for this project via run_command in this same "+
-				"turn, and fix any failures until they genuinely pass - do not skip this or assume it would pass. Only once you "+
-				"have seen it pass in this turn, mark it done in %s by changing its checkbox from \"- [ ]\" to \"- [x]\" using "+
-				"edit_file. If the task has nothing to build or test (e.g. documentation only), say so explicitly instead of "+
-				"marking it done without verification. If you discover the task needs to be split into smaller steps, edit %s "+
-				"to reflect that instead of marking it done.",
-			requirementsFile, next.text, progressFile, progressFile,
+				"turn, and fix any failures until they genuinely pass - do not skip this or assume it would pass. Before changing "+
+				"%s, always read_file it first to see its exact current content - never edit it from memory, since your view of it "+
+				"may be stale. Prefer edit_file for a single checkbox change over rewriting the whole file with write_file, which "+
+				"risks clobbering other tasks' state if your copy of it is out of date. Only once you have seen the build/test "+
+				"pass in this turn, mark this task done in %s by changing its checkbox from \"- [ ]\" to \"- [x]\". If the task has "+
+				"nothing to build or test (e.g. documentation only), say so explicitly instead of marking it done without "+
+				"verification. If you discover the task needs to be split into smaller steps, edit %s to reflect that instead of "+
+				"marking it done.",
+			retryNote, requirementsFile, next.text, progressFile, progressFile, progressFile,
 		)
 		if err := ag.RunTurn(ctx, prompt); err != nil {
 			return fmt.Errorf("working on %q: %w", next.text, err)
