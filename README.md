@@ -11,6 +11,7 @@ Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, �
 - เก็บ context การทำงานลงไฟล์ `.context` และ compact อัตโนมัติทุก 20 รอบ
 - คำสั่ง `/coding` แตก `requirements.md` เป็น task checklist ในไฟล์ `.progress` แล้วไล่ทำทีละ task พร้อม verify — รองรับ **incremental coding**: ถ้าแก้/เพิ่ม `requirements.md` แล้วสั่ง `/coding` ซ้ำ จะตรวจพบความเปลี่ยนแปลง (เทียบ hash เก็บไว้ใน `.progress.hash`) แล้วให้ model reconcile `.progress` ก่อน (เพิ่ม task ใหม่/uncheck task เดิมที่ไม่ตรงกับ requirement ที่เปลี่ยน) โดยไม่ต้องเริ่ม plan ใหม่ทั้งหมด
 - ระหว่าง `/coding` ทำงาน ตัว system prompt จะเข้มงวดขึ้น (`AUTONOMOUS CODING MODE`) กำชับว่าห้าม mark task ว่าเสร็จโดยไม่ได้รัน build/test จริงในรอบนั้นแล้วเห็นผลผ่านจริง — เป็นการกำกับผ่าน prompt เท่านั้น ไม่มีการตรวจสอบซ้ำจากฝั่งโปรแกรมเอง จึงยังขึ้นกับความสามารถ/ความซื่อสัตย์ของ model ที่ใช้อยู่
+- prompt ที่สั่งให้เขียน/แก้ `.progress` (ทั้งตอนสร้างครั้งแรกและตอน reconcile) กำชับให้เขียนคำอธิบาย task เป็น**ภาษาอังกฤษเสมอ** แม้ `requirements.md` จะเป็นภาษาอื่น (เก็บชื่อ/label เฉพาะจาก requirement ไว้เป็นภาษาเดิมได้เพื่ออ้างอิง) เนื่องจากบาง model เขียนภาษาอื่นได้ไม่ดีเท่าภาษาอังกฤษ
 
 ## ความปลอดภัย (โดยตั้งใจ)
 

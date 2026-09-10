@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"jonnyq/internal/agent"
@@ -12,6 +13,18 @@ import (
 	"jonnyq/internal/tools"
 	"jonnyq/internal/ui"
 )
+
+// lastUserContent returns the content of the last user-role message in a
+// sent ChatRequest, i.e. the actual prompt text coding.Run composed for
+// that turn.
+func lastUserContent(req llm.ChatRequest) string {
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == llm.RoleUser {
+			return req.Messages[i].Content
+		}
+	}
+	return ""
+}
 
 // step is one canned reply to a single Chat call.
 type step struct {
@@ -22,12 +35,14 @@ type step struct {
 // asked for more calls than were scripted, so tests can assert exactly how
 // many turns Run performed (e.g. that reconciliation did or didn't happen).
 type sequenceProvider struct {
-	t     *testing.T
-	calls int
-	steps []step
+	t        *testing.T
+	calls    int
+	steps    []step
+	sentReqs []llm.ChatRequest
 }
 
 func (p *sequenceProvider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan llm.ChatEvent, error) {
+	p.sentReqs = append(p.sentReqs, req)
 	if p.calls >= len(p.steps) {
 		return nil, fmt.Errorf("unexpected Chat call #%d (only %d scripted)", p.calls+1, len(p.steps))
 	}
@@ -108,6 +123,10 @@ func TestRunGeneratesProgressWhenMissing(t *testing.T) {
 		t.Errorf("unexpected .progress content: %q", progData)
 	}
 
+	if got := lastUserContent(p.sentReqs[0]); !strings.Contains(got, "in English") {
+		t.Errorf("expected the generation prompt to instruct English task descriptions, got: %s", got)
+	}
+
 	hash, err := os.ReadFile(filepath.Join(dir, hashFile))
 	if err != nil {
 		t.Fatalf("expected %s to be written: %v", hashFile, err)
@@ -179,6 +198,10 @@ func TestRunReconcilesWhenRequirementsChanged(t *testing.T) {
 	}
 	if string(progData) != "- [x] old task\n- [x] new task\n" {
 		t.Errorf("unexpected .progress content: %q", progData)
+	}
+
+	if got := lastUserContent(p.sentReqs[0]); !strings.Contains(got, "in English") {
+		t.Errorf("expected the reconcile prompt to instruct English task descriptions, got: %s", got)
 	}
 
 	gotHash, err := os.ReadFile(filepath.Join(dir, hashFile))

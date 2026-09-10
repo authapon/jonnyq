@@ -37,6 +37,15 @@ const (
 
 var checklistRe = regexp.MustCompile(`^- \[([ xX])\]\s*(.+)$`)
 
+// progressLanguageRule is included in every prompt that writes to
+// .progress. Some models write noticeably worse task descriptions in
+// languages other than English even when requirements.md itself is in
+// another language, so the checklist stays in English regardless of the
+// requirement's language; only proper nouns/labels quoted from the
+// requirement should keep their original language.
+const progressLanguageRule = "Write task descriptions in %s in English, even if %s is written in another language. " +
+	"Only keep names, labels, or short quoted terms from %s in their original language where useful for reference."
+
 type task struct {
 	done bool
 	text string
@@ -103,8 +112,9 @@ func Run(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) err
 				"ordered so each task's dependencies come before it. Write the checklist to %s as GitHub-style markdown checkboxes, "+
 				"one task per line: \"- [ ] <task>\" - each description concrete enough that it's unambiguous when it's done. "+
 				"Include an initial task for any missing project scaffolding/toolchain setup, and a final task that verifies the "+
-				"whole thing end-to-end. Do not implement anything yet - only produce the task list.",
-			requirementsFile, progressFile,
+				"whole thing end-to-end. "+progressLanguageRule+" "+
+				"Do not implement anything yet - only produce the task list.",
+			requirementsFile, progressFile, progressFile, requirementsFile, requirementsFile,
 		)
 		if err := ag.RunTurn(ctx, prompt); err != nil {
 			return fmt.Errorf("generating %s: %w", progressFile, err)
@@ -122,8 +132,9 @@ func Run(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) err
 				"then update %s: add new unchecked tasks (\"- [ ] ...\") for anything new or changed that still needs work, and if "+
 				"a previously completed task (\"- [x]\") no longer matches the current requirement, uncheck it back to \"- [ ]\" and "+
 				"adjust its description to reflect what's actually needed now. Leave unrelated existing tasks and their checked "+
-				"state as-is. Do not implement anything yet - only update the task list.",
-			requirementsFile, progressFile, requirementsFile, progressFile, progressFile,
+				"state as-is. "+progressLanguageRule+" "+
+				"Do not implement anything yet - only update the task list.",
+			requirementsFile, progressFile, requirementsFile, progressFile, progressFile, progressFile, requirementsFile, requirementsFile,
 		)
 		if err := ag.RunTurn(ctx, prompt); err != nil {
 			return fmt.Errorf("reconciling %s: %w", progressFile, err)
