@@ -48,8 +48,12 @@ type owTool struct {
 }
 
 type owMessage struct {
-	Role      string       `json:"role"`
-	Content   string       `json:"content,omitempty"`
+	Role string `json:"role"`
+	// Content intentionally has no omitempty when this type is used to
+	// build a request (see the matching field in oaMessage in openai.go
+	// for why): omitempty only affects encoding, so it's harmless for the
+	// response-decoding use of this same struct.
+	Content   string       `json:"content"`
 	Thinking  string       `json:"thinking,omitempty"`
 	ToolCalls []owToolCall `json:"tool_calls,omitempty"`
 }

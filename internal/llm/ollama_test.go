@@ -2,7 +2,9 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -64,6 +66,49 @@ func TestOllamaChatToolCalls(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0].Name != "read_file" || calls[0].Arguments != `{"path":"a.txt"}` {
 		t.Errorf("unexpected tool calls: %+v", calls)
+	}
+}
+
+// TestOllamaRequestAlwaysIncludesContentKey mirrors the OpenAI-provider
+// regression test: a tool result that happens to be an empty string (e.g.
+// a shell command that succeeded with no output) must still send an
+// explicit "content" key rather than have encoding/json drop it.
+func TestOllamaRequestAlwaysIncludesContentKey(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		fmt.Fprintln(w, `{"message":{"role":"assistant","content":""},"done":true}`)
+	}))
+	defer srv.Close()
+
+	p := NewOllamaProvider(srv.URL, "")
+	events, err := p.Chat(context.Background(), ChatRequest{Model: "test", Messages: []Message{
+		{Role: RoleUser, Content: "run go mod tidy"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_1", Name: "run_command", Arguments: `{"command":"go mod tidy"}`}}},
+		{Role: RoleTool, Content: "", ToolCallID: "call_1", Name: "run_command"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+
+	var decoded struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("invalid request JSON: %v\nbody: %s", err, body)
+	}
+	last := decoded.Messages[len(decoded.Messages)-1]
+	if last["role"] != "tool" {
+		t.Fatalf("expected the last message to be the tool result, got: %+v", last)
+	}
+	content, present := last["content"]
+	if !present {
+		t.Errorf("expected the tool message to include a \"content\" key even when empty, got: %+v", last)
+	}
+	if content != "" {
+		t.Errorf("expected content to be an empty string, got: %v", content)
 	}
 }
 

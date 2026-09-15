@@ -31,8 +31,14 @@ func NewOpenAIProvider(baseURL, key string) *OpenAIProvider {
 }
 
 type oaMessage struct {
-	Role       string       `json:"role"`
-	Content    string       `json:"content,omitempty"`
+	Role string `json:"role"`
+	// Content intentionally has no omitempty: some OpenAI-compatible
+	// servers (e.g. LM Studio's llama.cpp backend) reject a message whose
+	// "content" key is missing entirely, which is what encoding/json would
+	// do for a tool result that happened to be an empty string (e.g. a
+	// shell command that succeeded with no output). Sending "content":""
+	// is always valid; omitting the key is not, for some servers.
+	Content    string       `json:"content"`
 	ToolCalls  []oaToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string       `json:"tool_call_id,omitempty"`
 	Name       string       `json:"name,omitempty"`
