@@ -1,11 +1,11 @@
-// Package coding implements the /coding automation: turn requirements.md
-// into a tracked task checklist (.progress) and drive the agent through it
-// one task at a time until everything is implemented, verified, and checked
-// off. The actual writing/compiling/testing is done by the agent itself
-// (it already has read_file/write_file/edit_file/run_command); this package
-// only owns the outer loop, progress tracking, and detecting when
-// requirements.md has changed so the plan can be reconciled incrementally
-// instead of starting over.
+// Package coding implements the /plan, /coding, and /autocoding automation:
+// turn requirements.md into a tracked task checklist (.progress), and drive
+// the agent through it - either one task at a time or all the way through.
+// The actual writing/compiling/testing is done by the agent itself (it
+// already has read_file/write_file/edit_file/run_command); this package
+// only owns planning, progress tracking, and detecting when requirements.md
+// has changed so the plan can be reconciled incrementally instead of
+// starting over.
 package coding
 
 import (
@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"jonnyq/internal/agent"
@@ -26,12 +27,17 @@ const (
 	requirementsFile = "requirements.md"
 	progressFile     = ".progress"
 	// hashFile records the requirements.md content hash as of the last time
-	// .progress was generated or reconciled, so a later /coding run can
-	// tell whether requirements.md changed since and needs reconciling.
+	// .progress was generated or reconciled, so a later /plan can tell
+	// whether requirements.md changed since and needs reconciling.
 	hashFile = ".progress.hash"
-	// maxStallRounds aborts the loop if the same task stays unchecked after
-	// this many consecutive attempts, so a genuinely stuck task surfaces to
-	// the user instead of looping forever unnoticed.
+	// retryFile persists how many consecutive /coding invocations have
+	// picked the same still-unfinished task, since (unlike /autocoding)
+	// /coding runs one task per invocation with no in-memory loop to track
+	// it across calls.
+	retryFile = ".progress.retry"
+	// maxStallRounds aborts once the same task stays unchecked after this
+	// many consecutive attempts, so a genuinely stuck task surfaces to the
+	// user instead of being retried forever unnoticed.
 	maxStallRounds = 5
 )
 
@@ -91,8 +97,107 @@ func writeStoredHash(path, hash string) error {
 	return os.WriteFile(path, []byte(hash), 0o644)
 }
 
-// Run drives the /coding automation in workDir.
-func Run(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) error {
+// retryState is the persisted "same task, N attempts in a row" counter used
+// by RunOneTask (/coding) across separate invocations.
+type retryState struct {
+	text  string
+	count int
+}
+
+func loadRetryState(path string) retryState {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return retryState{}
+	}
+	parts := strings.SplitN(strings.TrimRight(string(data), "\n"), "\t", 2)
+	if len(parts) != 2 {
+		return retryState{}
+	}
+	n, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return retryState{}
+	}
+	return retryState{count: n, text: parts[1]}
+}
+
+func writeRetryState(path string, s retryState) error {
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\t%s", s.count, s.text)), 0o644)
+}
+
+func clearRetryState(path string) {
+	_ = os.Remove(path)
+}
+
+func buildGeneratePrompt() string {
+	return fmt.Sprintf(
+		"Read %s and break its requirements down into a checklist of small, independently verifiable implementation tasks, "+
+			"ordered so each task's dependencies come before it. Also look at the existing code in the working directory, if "+
+			"any - don't propose tasks for things already implemented, and account for what's already there. Write the "+
+			"checklist to %s as GitHub-style markdown checkboxes, one task per line: \"- [ ] <task>\" - each description "+
+			"concrete enough that it's unambiguous when it's done. Include an initial task for any missing project "+
+			"scaffolding/toolchain setup, and a final task that verifies the whole thing end-to-end. "+progressLanguageRule+" "+
+			"Do not implement anything yet - only produce the task list.",
+		requirementsFile, progressFile, progressFile, requirementsFile, requirementsFile,
+	)
+}
+
+func buildReconcilePrompt() string {
+	return fmt.Sprintf(
+		"%s has changed since %s was last updated. Compare the current content of %s against %s and the existing code in "+
+			"the working directory, then update %s: add new unchecked tasks (\"- [ ] ...\") for anything new or changed that "+
+			"still needs work, and if a previously completed task (\"- [x]\") no longer matches the current requirement or "+
+			"the actual code, uncheck it back to \"- [ ]\" and adjust its description to reflect what's actually needed now. "+
+			"Leave unrelated existing tasks and their checked state as-is. "+progressLanguageRule+" "+
+			"Do not implement anything yet - only update the task list.",
+		requirementsFile, progressFile, requirementsFile, progressFile, progressFile, progressFile, requirementsFile, requirementsFile,
+	)
+}
+
+func buildTaskPrompt(taskText string, stall int) string {
+	var retryNote string
+	if stall > 0 {
+		// The same task came back unchecked after a previous attempt.
+		// Left as a plain "work on this task" prompt, models have been
+		// observed to just repeat "I already did this and verified it"
+		// from their own conversation history without noticing that
+		// .progress on disk still shows it unchecked - typically because
+		// an earlier edit_file call silently failed to match (its
+		// old_string didn't exactly match the current line) or a
+		// write_file rewrite of the whole file was based on a stale,
+		// pre-edit copy in the model's context. Point this out explicitly
+		// so the model investigates instead of repeating the same
+		// unverified claim.
+		retryNote = fmt.Sprintf(
+			"Note: this task was already attempted %d time(s) before and is STILL shown as unchecked (\"- [ ]\") in %s right "+
+				"now. Do not assume you already finished it, even if it looks familiar - re-check from scratch: read_file %s "+
+				"and your implementation files to see their real current state, figure out concretely why the checkbox didn't "+
+				"end up set (a common cause: edit_file's old_string must match the line in %s exactly, or a prior write_file "+
+				"rewrote %s from a stale in-memory copy and clobbered the change), and fix it for real this time.\n\n",
+			stall, progressFile, progressFile, progressFile, progressFile,
+		)
+	}
+	return fmt.Sprintf(
+		"%sWork on this task from %s: %q\n\n"+
+			"Implement it, then actually run the real build and test commands for this project via run_command in this same "+
+			"turn, and fix any failures until they genuinely pass - do not skip this or assume it would pass. Before changing "+
+			"%s, always read_file it first to see its exact current content - never edit it from memory, since your view of it "+
+			"may be stale. Prefer edit_file for a single checkbox change over rewriting the whole file with write_file, which "+
+			"risks clobbering other tasks' state if your copy of it is out of date. Only once you have seen the build/test "+
+			"pass in this turn, mark this task done in %s by changing its checkbox from \"- [ ]\" to \"- [x]\". If the task has "+
+			"nothing to build or test (e.g. documentation only), say so explicitly instead of marking it done without "+
+			"verification. If you discover the task needs to be split into smaller steps, edit %s to reflect that instead of "+
+			"marking it done.",
+		retryNote, requirementsFile, taskText, progressFile, progressFile, progressFile,
+	)
+}
+
+// Plan is /plan: it generates .progress from requirements.md if missing, or
+// reconciles it if requirements.md changed since .progress was last
+// generated/reconciled (checked against a stored content hash), checking
+// consistency with the existing codebase either way. It never implements
+// anything. If .progress already exists and requirements.md hasn't changed,
+// it does nothing and reports that the plan is already up to date.
+func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) error {
 	reqPath := filepath.Join(workDir, requirementsFile)
 	reqData, err := os.ReadFile(reqPath)
 	if err != nil {
@@ -106,17 +211,8 @@ func Run(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) err
 	defer func() { ag.CodingMode = false }()
 
 	if _, err := os.Stat(progPath); err != nil {
-		w.Plainln("[coding] no " + progressFile + " found, generating task list from " + requirementsFile)
-		prompt := fmt.Sprintf(
-			"Read %s and break its requirements down into a checklist of small, independently verifiable implementation tasks, "+
-				"ordered so each task's dependencies come before it. Write the checklist to %s as GitHub-style markdown checkboxes, "+
-				"one task per line: \"- [ ] <task>\" - each description concrete enough that it's unambiguous when it's done. "+
-				"Include an initial task for any missing project scaffolding/toolchain setup, and a final task that verifies the "+
-				"whole thing end-to-end. "+progressLanguageRule+" "+
-				"Do not implement anything yet - only produce the task list.",
-			requirementsFile, progressFile, progressFile, requirementsFile, requirementsFile,
-		)
-		if err := ag.RunTurn(ctx, prompt); err != nil {
+		w.Plainln("[plan] no " + progressFile + " found, generating task list from " + requirementsFile)
+		if err := ag.RunTurn(ctx, buildGeneratePrompt()); err != nil {
 			return fmt.Errorf("generating %s: %w", progressFile, err)
 		}
 		if _, err := os.Stat(progPath); err != nil {
@@ -125,24 +221,89 @@ func Run(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) err
 		if err := writeStoredHash(hashPath, currentHash); err != nil {
 			return fmt.Errorf("recording requirements hash: %w", err)
 		}
-	} else if readStoredHash(hashPath) != currentHash {
-		w.Plainln("[coding] " + requirementsFile + " changed since " + progressFile + " was last updated; reconciling")
-		prompt := fmt.Sprintf(
-			"%s has changed since %s was last updated. Compare the current content of %s against %s and the existing code, "+
-				"then update %s: add new unchecked tasks (\"- [ ] ...\") for anything new or changed that still needs work, and if "+
-				"a previously completed task (\"- [x]\") no longer matches the current requirement, uncheck it back to \"- [ ]\" and "+
-				"adjust its description to reflect what's actually needed now. Leave unrelated existing tasks and their checked "+
-				"state as-is. "+progressLanguageRule+" "+
-				"Do not implement anything yet - only update the task list.",
-			requirementsFile, progressFile, requirementsFile, progressFile, progressFile, progressFile, requirementsFile, requirementsFile,
-		)
-		if err := ag.RunTurn(ctx, prompt); err != nil {
-			return fmt.Errorf("reconciling %s: %w", progressFile, err)
-		}
-		if err := writeStoredHash(hashPath, currentHash); err != nil {
-			return fmt.Errorf("recording requirements hash: %w", err)
-		}
+		return nil
 	}
+
+	if readStoredHash(hashPath) == currentHash {
+		w.Plainln("[plan] " + progressFile + " is already up to date with " + requirementsFile)
+		return nil
+	}
+
+	w.Plainln("[plan] " + requirementsFile + " changed since " + progressFile + " was last updated; reconciling")
+	if err := ag.RunTurn(ctx, buildReconcilePrompt()); err != nil {
+		return fmt.Errorf("reconciling %s: %w", progressFile, err)
+	}
+	if err := writeStoredHash(hashPath, currentHash); err != nil {
+		return fmt.Errorf("recording requirements hash: %w", err)
+	}
+	return nil
+}
+
+// RunOneTask is /coding: it works on exactly one unfinished task from
+// .progress and then returns, without looping through the rest. .progress
+// must already exist (via /plan or /autocoding) - it is not generated here.
+func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) error {
+	progPath := filepath.Join(workDir, progressFile)
+	if _, err := os.Stat(progPath); err != nil {
+		return fmt.Errorf("%s not found; run /plan first to generate it from %s", progressFile, requirementsFile)
+	}
+
+	tasks, err := parseProgress(progPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", progressFile, err)
+	}
+	next, ok := firstUnfinished(tasks)
+	if !ok {
+		w.Plainln("[coding] all tasks in " + progressFile + " are checked off")
+		return nil
+	}
+
+	retryPath := filepath.Join(workDir, retryFile)
+	prev := loadRetryState(retryPath)
+	stall := 0
+	if prev.text == next.text {
+		stall = prev.count
+	}
+
+	ag.CodingMode = true
+	defer func() { ag.CodingMode = false }()
+
+	w.Plainln(fmt.Sprintf("[coding] working on: %s", next.text))
+	if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall)); err != nil {
+		return fmt.Errorf("working on %q: %w", next.text, err)
+	}
+
+	tasksAfter, err := parseProgress(progPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", progressFile, err)
+	}
+	if nextAfter, stillUnfinished := firstUnfinished(tasksAfter); stillUnfinished && nextAfter.text == next.text {
+		newCount := stall + 1
+		if newCount >= maxStallRounds {
+			clearRetryState(retryPath)
+			return fmt.Errorf("task %q made no progress after %d attempts via /coding; check %s and requirements.md manually", next.text, maxStallRounds, progressFile)
+		}
+		if err := writeRetryState(retryPath, retryState{text: next.text, count: newCount}); err != nil {
+			return fmt.Errorf("recording retry state: %w", err)
+		}
+	} else {
+		clearRetryState(retryPath)
+	}
+	return nil
+}
+
+// AutoRun is /autocoding: the original /coding behavior, kept under a new
+// name. It plans (as Plan does) if needed, then works through every
+// unfinished task in .progress in one run instead of stopping after each.
+func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) error {
+	if err := Plan(ctx, ag, w, workDir); err != nil {
+		return err
+	}
+
+	progPath := filepath.Join(workDir, progressFile)
+
+	ag.CodingMode = true
+	defer func() { ag.CodingMode = false }()
 
 	lastText := ""
 	stall := 0
@@ -156,7 +317,7 @@ func Run(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) err
 		}
 		next, ok := firstUnfinished(tasks)
 		if !ok {
-			w.Plainln("[coding] all tasks in " + progressFile + " are checked off")
+			w.Plainln("[autocoding] all tasks in " + progressFile + " are checked off")
 			return nil
 		}
 
@@ -170,43 +331,8 @@ func Run(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) err
 			stall = 0
 		}
 
-		w.Plainln(fmt.Sprintf("[coding] working on: %s", next.text))
-		var retryNote string
-		if stall > 0 {
-			// The same task came back unchecked after a previous attempt.
-			// Left as a plain "work on this task" prompt, models have been
-			// observed to just repeat "I already did this and verified it"
-			// from their own conversation history without noticing that
-			// .progress on disk still shows it unchecked - typically
-			// because an earlier edit_file call silently failed to match
-			// (its old_string didn't exactly match the current line) or a
-			// write_file rewrite of the whole file was based on a stale,
-			// pre-edit copy in the model's context. Point this out
-			// explicitly so the model investigates instead of repeating
-			// the same unverified claim.
-			retryNote = fmt.Sprintf(
-				"Note: this task was already attempted %d time(s) before and is STILL shown as unchecked (\"- [ ]\") in %s right "+
-					"now. Do not assume you already finished it, even if it looks familiar - re-check from scratch: read_file %s "+
-					"and your implementation files to see their real current state, figure out concretely why the checkbox didn't "+
-					"end up set (a common cause: edit_file's old_string must match the line in %s exactly, or a prior write_file "+
-					"rewrote %s from a stale in-memory copy and clobbered the change), and fix it for real this time.\n\n",
-				stall, progressFile, progressFile, progressFile, progressFile,
-			)
-		}
-		prompt := fmt.Sprintf(
-			"%sWork on this task from %s: %q\n\n"+
-				"Implement it, then actually run the real build and test commands for this project via run_command in this same "+
-				"turn, and fix any failures until they genuinely pass - do not skip this or assume it would pass. Before changing "+
-				"%s, always read_file it first to see its exact current content - never edit it from memory, since your view of it "+
-				"may be stale. Prefer edit_file for a single checkbox change over rewriting the whole file with write_file, which "+
-				"risks clobbering other tasks' state if your copy of it is out of date. Only once you have seen the build/test "+
-				"pass in this turn, mark this task done in %s by changing its checkbox from \"- [ ]\" to \"- [x]\". If the task has "+
-				"nothing to build or test (e.g. documentation only), say so explicitly instead of marking it done without "+
-				"verification. If you discover the task needs to be split into smaller steps, edit %s to reflect that instead of "+
-				"marking it done.",
-			retryNote, requirementsFile, next.text, progressFile, progressFile, progressFile,
-		)
-		if err := ag.RunTurn(ctx, prompt); err != nil {
+		w.Plainln(fmt.Sprintf("[autocoding] working on: %s", next.text))
+		if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall)); err != nil {
 			return fmt.Errorf("working on %q: %w", next.text, err)
 		}
 	}

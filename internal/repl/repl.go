@@ -29,7 +29,9 @@ const helpText = `Slash commands:
   /think <true|false>               enable or disable model thinking
   /run_command_timeout <seconds>    set the run_command timeout in seconds
   /prompt <file>                    read a prompt from file and send it, as if typed
-  /coding                           run automated coding from requirements.md, tracked in .progress (Ctrl-C cancels)
+  /plan                             generate/reconcile .progress from requirements.md, checked against the codebase (no coding)
+  /coding                           work on the next unfinished task in .progress, then stop (Ctrl-C cancels)
+  /autocoding                       plan if needed, then work through every task in .progress in one run (Ctrl-C cancels)
   /exit  /bye                       exit jonnyq
 
 Multi-line prompts: end a line with a trailing backslash to continue it on
@@ -234,12 +236,26 @@ func (r *REPL) handleSlash(ctx context.Context, line string) (bool, error) {
 		}
 		return false, r.Agent.RunTurn(ctx, string(data))
 
+	case "/plan":
+		if r.Cfg.Model == "" {
+			r.UI.Plainln("no model set; use /model <name> first")
+			return false, nil
+		}
+		return false, coding.Plan(ctx, r.Agent, r.UI, ".")
+
 	case "/coding":
 		if r.Cfg.Model == "" {
 			r.UI.Plainln("no model set; use /model <name> first")
 			return false, nil
 		}
-		return false, coding.Run(ctx, r.Agent, r.UI, ".")
+		return false, coding.RunOneTask(ctx, r.Agent, r.UI, ".")
+
+	case "/autocoding":
+		if r.Cfg.Model == "" {
+			r.UI.Plainln("no model set; use /model <name> first")
+			return false, nil
+		}
+		return false, coding.AutoRun(ctx, r.Agent, r.UI, ".")
 
 	default:
 		r.UI.Plainln("unknown command " + cmd + "; try /help")

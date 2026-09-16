@@ -1,6 +1,6 @@
 # jonnyq
 
-Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, ไม่มี third-party Go dependency) รองรับ provider แบบ Ollama (native API) และ OpenAI-compatible (SSE) พร้อม tool-calling loop, context persistence, และคำสั่ง `/coding` สำหรับ automate การเขียนโค้ดจาก `requirements.md`
+Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, ไม่มี third-party Go dependency) รองรับ provider แบบ Ollama (native API) และ OpenAI-compatible (SSE) พร้อม tool-calling loop, context persistence, และชุดคำสั่ง `/plan` `/coding` `/autocoding` สำหรับ automate การเขียนโค้ดจาก `requirements.md`
 
 ## Features
 
@@ -9,10 +9,11 @@ Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, �
 - Tools ให้ model เรียกใช้: `read_file`, `write_file`, `edit_file`, `create_folder`, `web_search`, `web_fetch`, `read_pdf`, `read_pic`, `run_command`, `read_skill`
 - แสดงผลแบบมีสี: ขาว=prompt, เขียว=thinking, แดง=tool call, เหลือง=answer, เทา=metric ท้ายรอบ — แต่ละ section (thinking/tool call/answer) มีบรรทัดว่างคั่นและหัวข้อตัวหนาสีสดกำกับไว้ (เช่น **Thinking**, **Tool call**, **Answer**) พร้อม log ไฟล์แบบ plain text (`output.txt`)
 - เก็บ context การทำงานลงไฟล์ `.context` และ compact อัตโนมัติทุก 20 รอบ
-- คำสั่ง `/coding` แตก `requirements.md` เป็น task checklist ในไฟล์ `.progress` แล้วไล่ทำทีละ task พร้อม verify — รองรับ **incremental coding**: ถ้าแก้/เพิ่ม `requirements.md` แล้วสั่ง `/coding` ซ้ำ จะตรวจพบความเปลี่ยนแปลง (เทียบ hash เก็บไว้ใน `.progress.hash`) แล้วให้ model reconcile `.progress` ก่อน (เพิ่ม task ใหม่/uncheck task เดิมที่ไม่ตรงกับ requirement ที่เปลี่ยน) โดยไม่ต้องเริ่ม plan ใหม่ทั้งหมด
-- ระหว่าง `/coding` ทำงาน ตัว system prompt จะเข้มงวดขึ้น (`AUTONOMOUS CODING MODE`) กำชับว่าห้าม mark task ว่าเสร็จโดยไม่ได้รัน build/test จริงในรอบนั้นแล้วเห็นผลผ่านจริง — เป็นการกำกับผ่าน prompt เท่านั้น ไม่มีการตรวจสอบซ้ำจากฝั่งโปรแกรมเอง จึงยังขึ้นกับความสามารถ/ความซื่อสัตย์ของ model ที่ใช้อยู่
-- prompt ที่สั่งให้เขียน/แก้ `.progress` (ทั้งตอนสร้างครั้งแรกและตอน reconcile) กำชับให้เขียนคำอธิบาย task เป็น**ภาษาอังกฤษเสมอ** แม้ `requirements.md` จะเป็นภาษาอื่น (เก็บชื่อ/label เฉพาะจาก requirement ไว้เป็นภาษาเดิมได้เพื่ออ้างอิง) เนื่องจากบาง model เขียนภาษาอื่นได้ไม่ดีเท่าภาษาอังกฤษ
-- ถ้า `/coding` เจอ task เดิมค้างซ้ำ (ยัง `- [ ]` อยู่ใน `.progress` ทั้งที่ทำมาแล้วรอบหนึ่ง มักเกิดจาก `edit_file` ก่อนหน้าไม่ match exact text หรือ `write_file` เขียนทับทั้งไฟล์จาก context เก่าที่ยังไม่ทันอัปเดต) ตั้งแต่รอบที่ 2 เป็นต้นไป prompt จะแนบข้อความชี้ให้ model รู้ตัวว่า task นี้ยังไม่ถูกติ๊กจริงบนไฟล์ ให้ไป `read_file` เช็คของจริงก่อน แทนที่จะเชื่อความจำตัวเองแล้วอ้างว่าทำเสร็จไปแล้วซ้ำ ๆ
+- แยก planning ออกจากการเขียนโค้ดเป็น 3 คำสั่ง (ดูรายละเอียดที่หัวข้อ Slash commands): `/plan` สร้าง/reconcile `.progress` อย่างเดียว, `/coding` ทำทีละ task แล้วหยุด, `/autocoding` plan แล้วไล่ทำทุก task รวดเดียว (พฤติกรรมเดิมของ `/coding` ก่อนแยก)
+- **Incremental planning**: `/plan` (และ `/autocoding` ซึ่งเรียก `/plan` ให้อัตโนมัติ) ตรวจ hash ของ `requirements.md` เทียบกับที่เก็บไว้ใน `.progress.hash` ถ้าแก้/เพิ่ม requirement มา จะให้ model reconcile `.progress` ต่อยอด (เพิ่ม task ใหม่/uncheck task เดิมที่ไม่ตรงกับ requirement หรือโค้ดปัจจุบันแล้ว) โดยไม่ต้องเริ่ม plan ใหม่ทั้งหมด และเช็คความสอดคล้องกับโค้ดที่มีอยู่แล้วเสมอทั้งตอนสร้างครั้งแรกและตอน reconcile
+- ระหว่าง `/coding`/`/autocoding` ทำงาน ตัว system prompt จะเข้มงวดขึ้น (`AUTONOMOUS CODING MODE`) กำชับว่าห้าม mark task ว่าเสร็จโดยไม่ได้รัน build/test จริงในรอบนั้นแล้วเห็นผลผ่านจริง — เป็นการกำกับผ่าน prompt เท่านั้น ไม่มีการตรวจสอบซ้ำจากฝั่งโปรแกรมเอง จึงยังขึ้นกับความสามารถ/ความซื่อสัตย์ของ model ที่ใช้อยู่
+- prompt ที่สั่งให้เขียน/แก้ `.progress` กำชับให้เขียนคำอธิบาย task เป็น**ภาษาอังกฤษเสมอ** แม้ `requirements.md` จะเป็นภาษาอื่น (เก็บชื่อ/label เฉพาะจาก requirement ไว้เป็นภาษาเดิมได้เพื่ออ้างอิง) เนื่องจากบาง model เขียนภาษาอื่นได้ไม่ดีเท่าภาษาอังกฤษ
+- ถ้าเจอ task เดิมค้างซ้ำ (ยัง `- [ ]` อยู่ใน `.progress` ทั้งที่ทำมาแล้วรอบหนึ่ง มักเกิดจาก `edit_file` ก่อนหน้าไม่ match exact text หรือ `write_file` เขียนทับทั้งไฟล์จาก context เก่าที่ยังไม่ทันอัปเดต) ตั้งแต่รอบที่ 2 เป็นต้นไป prompt จะแนบข้อความชี้ให้ model รู้ตัวว่า task นี้ยังไม่ถูกติ๊กจริงบนไฟล์ ให้ไป `read_file` เช็คของจริงก่อน แทนที่จะเชื่อความจำตัวเองแล้วอ้างว่าทำเสร็จไปแล้วซ้ำ ๆ — `/coding` เก็บตัวนับนี้ไว้ในไฟล์ `.progress.retry` เพราะแต่ละครั้งที่เรียกเป็นคนละ process/turn กัน ไม่มี loop ในหน่วยความจำให้จำต่อกันแบบ `/autocoding`
 
 ## ความปลอดภัย (โดยตั้งใจ)
 
@@ -123,7 +124,9 @@ JONNYQ_MODEL=llama3 ./jonnyq
 | `/think <true\|false>` | เปิด/ปิด thinking |
 | `/run_command_timeout <seconds>` | ตั้ง timeout ของ `run_command` (วินาที) ที่กำลังรันอยู่ |
 | `/prompt <file>` | อ่านเนื้อหาไฟล์มาเป็น prompt แล้วส่งเลย เหมือนพิมพ์เอง |
-| `/coding` | automate เขียนโค้ดจาก `requirements.md` ทั้งหมด พร้อม compile/test/verify ทีละ task ใน `.progress` (รองรับแก้ `requirements.md` แล้วสั่งซ้ำเพื่อทำต่อแบบ incremental) |
+| `/plan` | สร้าง `.progress` จาก `requirements.md` ถ้ายังไม่มี หรือ reconcile ถ้า `requirements.md` เปลี่ยนไปแล้ว (เช็คความสอดคล้องกับโค้ดที่มีด้วย) — ไม่เขียนโค้ดใด ๆ |
+| `/coding` | ทำ task แรกที่ยังไม่เสร็จใน `.progress` **แค่ 1 ข้อแล้วหยุด** (ต้องมี `.progress` อยู่แล้ว ถ้ายังไม่มีให้สั่ง `/plan` ก่อน) |
+| `/autocoding` | พฤติกรรมเดิมของ `/coding` ก่อนแยกคำสั่ง: เรียก `/plan` ให้อัตโนมัติถ้าจำเป็น แล้วไล่ทำทุก task ใน `.progress` รวดเดียวจนครบ |
 | `/exit`, `/bye` | ออกจากโปรแกรม |
 
 ถ้ายังไม่ได้ตั้ง `-model`/`JONNYQ_MODEL` โปรแกรมจะแจ้งเตือนก่อนแสดง prompt และรับได้เฉพาะ slash command เท่านั้น จนกว่าจะสั่ง `/model <name>`
@@ -150,7 +153,7 @@ JONNYQ_MODEL=llama3 ./jonnyq
 
 หรือใช้ `/prompt <file>` เพื่ออ่าน prompt ยาว ๆ จากไฟล์แทนการพิมพ์ก็ได้เช่นกัน
 
-กด **Ctrl-C** เพื่อยกเลิกรอบการทำงานปัจจุบันได้โดยไม่ต้องปิดโปรแกรม รวมถึงระหว่างที่ `/coding` กำลังทำงานอยู่ด้วย (ยกเลิกได้ทั้ง turn ปัจจุบันของ agent และ process ของ `run_command` ที่กำลังรันอยู่)
+กด **Ctrl-C** เพื่อยกเลิกรอบการทำงานปัจจุบันได้โดยไม่ต้องปิดโปรแกรม รวมถึงระหว่างที่ `/plan`, `/coding`, หรือ `/autocoding` กำลังทำงานอยู่ด้วย (ยกเลิกได้ทั้ง turn ปัจจุบันของ agent และ process ของ `run_command` ที่กำลังรันอยู่)
 
 ## โครงสร้างโปรเจกต์
 
@@ -164,6 +167,6 @@ internal/tools/    read_file, write_file, edit_file, create_folder,
 internal/agent/    tool-calling loop, .context, compaction, metrics
 internal/repl/     prompt loop + slash commands
 internal/skill/    skill discovery
-internal/coding/   /coding automation + .progress
+internal/coding/   /plan, /coding, /autocoding automation + .progress
 internal/ui/       สีของ terminal + log แบบ plain text
 ```
