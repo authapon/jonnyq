@@ -49,6 +49,18 @@ type Agent struct {
 	roundsSinceCompact int
 }
 
+// decisiveThinkingPrompt is included in every system message, regardless of
+// mode: it asks the model to reason tightly and commit to a decision
+// instead of meandering or re-deliberating, without trading away accuracy.
+// It's a cheap, general-purpose complement to the harder repetition-loop
+// cutoff in repeat.go - that catches runaway output after the fact, this
+// tries to reduce how often it happens in the first place.
+const decisiveThinkingPrompt = "Think and act decisively: settle on an approach and commit to it rather than " +
+	"re-deliberating the same options, restating your plan, or second-guessing a decision you already made without " +
+	"new information. Keep reasoning tight and to the point - avoid long, meandering chains of thought. Speed must " +
+	"never come at the cost of correctness: verify anything uncertain with a tool call before asserting it as fact, " +
+	"and take the extra step when accuracy requires it.\n"
+
 // codingModePrompt is appended to the system message while CodingMode is
 // set. It exists because /coding runs unattended across many turns with no
 // human checking each step, so "looks right" is not an acceptable bar - the
@@ -86,6 +98,7 @@ func (a *Agent) buildSystemMessage() llm.Message {
 	sb.WriteString("You are jonnyq, a coding agent with tool access. Current date and time: ")
 	sb.WriteString(now)
 	sb.WriteString("\n")
+	sb.WriteString(decisiveThinkingPrompt)
 	skills := skill.Discover(a.SkillPaths)
 	if len(skills) > 0 {
 		sb.WriteString("Available skills (use read_skill with a name below to load its full content):\n")

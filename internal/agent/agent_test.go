@@ -204,3 +204,18 @@ func TestCodingModeAddsStrictPromptOnlyWhenSet(t *testing.T) {
 		t.Errorf("expected the verify-before-done rule to be present, got: %s", strict.Content)
 	}
 }
+
+func TestSystemMessageAlwaysIncludesDecisiveThinkingDirective(t *testing.T) {
+	a, _, _ := newTestAgent(t, nil)
+
+	plain := a.buildSystemMessage()
+	if !strings.Contains(plain.Content, "Think and act decisively") {
+		t.Errorf("expected the decisive-thinking directive in plain chat mode, got: %s", plain.Content)
+	}
+
+	a.CodingMode = true
+	coding := a.buildSystemMessage()
+	if !strings.Contains(coding.Content, "Think and act decisively") {
+		t.Errorf("expected the decisive-thinking directive in coding mode too, got: %s", coding.Content)
+	}
+}
