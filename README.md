@@ -8,7 +8,7 @@ Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, �
 - รองรับ 2 provider: `ollama` (native `/api/chat`, ได้ metric เวลาจริงจาก provider) และ `openai` (OpenAI-compatible `/v1/chat/completions` แบบ SSE)
 - Tools ให้ model เรียกใช้: `read_file`, `write_file`, `edit_file`, `create_folder`, `web_search`, `web_fetch`, `read_pdf`, `read_pic`, `run_command`, `read_skill`
 - แสดงผลแบบมีสี: ขาว=prompt, เขียว=thinking, แดง=tool call, เหลือง=answer, เทา=metric ท้ายรอบ — แต่ละ section (thinking/tool call/answer) มีบรรทัดว่างคั่นและหัวข้อตัวหนาสีสดกำกับไว้พร้อมวันเวลาที่ section นั้นเริ่ม เช่น `Thinking (2026-09-17 10:23:45)`, `Tool call (...)`, `Answer (...)` พร้อม log ไฟล์แบบ plain text (`output.txt`)
-- system prompt ที่ส่งให้ model ทุกรอบ ระบุชื่อ model และ context size ที่ใช้อยู่ไว้ด้วย นอกเหนือจากวันเวลาปัจจุบันและรายการ skill
+- prompt ที่รับคำสั่ง (`>`) แสดงชื่อ model และ context size ที่ใช้อยู่กำกับไว้ เช่น `ornith-1.5-35b-a3b (100000 token) >` (ก่อนตั้ง model จะเป็น `>` เฉยๆ)
 - เก็บ context การทำงานลงไฟล์ `.context` และ compact อัตโนมัติทุก 20 รอบ
 - แยก planning ออกจากการเขียนโค้ดเป็น 3 คำสั่ง (ดูรายละเอียดที่หัวข้อ Slash commands): `/plan` สร้าง/reconcile `.progress` อย่างเดียว, `/coding` ทำทีละ task แล้วหยุด, `/autocoding` plan แล้วไล่ทำทุก task รวดเดียว (พฤติกรรมเดิมของ `/coding` ก่อนแยก)
 - **Incremental planning**: `/plan` (และ `/autocoding` ซึ่งเรียก `/plan` ให้อัตโนมัติ) ตรวจ hash ของ `requirements.md` เทียบกับที่เก็บไว้ใน `.progress.hash` ถ้าแก้/เพิ่ม requirement มา จะให้ model reconcile `.progress` ต่อยอด (เพิ่ม task ใหม่/uncheck task เดิมที่ไม่ตรงกับ requirement หรือโค้ดปัจจุบันแล้ว) โดยไม่ต้องเริ่ม plan ใหม่ทั้งหมด และเช็คความสอดคล้องกับโค้ดที่มีอยู่แล้วเสมอทั้งตอนสร้างครั้งแรกและตอน reconcile

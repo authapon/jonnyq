@@ -78,7 +78,7 @@ func (r *REPL) Run(ctx context.Context) error {
 		if r.Cfg.Model == "" {
 			r.UI.Plainln("model is not set; use /model <name> (only slash commands are accepted until then)")
 		}
-		r.UI.Plain("> ")
+		r.UI.Plain(r.promptString())
 		raw, ok := readInput(scanner)
 		if !ok {
 			r.UI.Plainln("")
@@ -270,4 +270,15 @@ func (r *REPL) rebuildProvider() error {
 	}
 	r.Agent.Provider = p
 	return nil
+}
+
+// promptString is the "> " prompt shown before each read, e.g.
+// "ornith-1.5-35b-a3b (100000 token) > ". Before a model is set it falls
+// back to a bare "> " since there's nothing to show yet (the "model is not
+// set" notice above it already covers that case).
+func (r *REPL) promptString() string {
+	if r.Cfg.Model == "" {
+		return "> "
+	}
+	return fmt.Sprintf("%s (%d token) > ", r.Cfg.Model, r.Cfg.ContextSize)
 }

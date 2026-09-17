@@ -37,6 +37,27 @@ func newTestREPL(t *testing.T) *REPL {
 	return New(cfg, ag, w, rc)
 }
 
+func TestPromptStringShowsModelAndContextSize(t *testing.T) {
+	r := newTestREPL(t)
+	r.Cfg.Model = "ornith-1.5-35b-a3b"
+	r.Cfg.ContextSize = 100000
+
+	got := r.promptString()
+	want := "ornith-1.5-35b-a3b (100000 token) > "
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestPromptStringPlainWhenModelUnset(t *testing.T) {
+	r := newTestREPL(t)
+	r.Cfg.Model = ""
+
+	if got := r.promptString(); got != "> " {
+		t.Errorf("got %q, want %q", got, "> ")
+	}
+}
+
 func TestExitAndByeBothExit(t *testing.T) {
 	for _, cmd := range []string{"/exit", "/bye"} {
 		r := newTestREPL(t)

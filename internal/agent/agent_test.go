@@ -141,28 +141,6 @@ func TestRunTurnNoModelSet(t *testing.T) {
 	}
 }
 
-func TestSystemMessageIncludesModelAndContextSize(t *testing.T) {
-	a, _, _ := newTestAgent(t, nil)
-	a.Model = "llama3:70b"
-	a.ContextSize = 8192
-
-	msg := a.buildSystemMessage()
-	if !strings.Contains(msg.Content, "Model: llama3:70b") {
-		t.Errorf("expected system message to include the model name, got: %s", msg.Content)
-	}
-	if !strings.Contains(msg.Content, "Context size: 8192") {
-		t.Errorf("expected system message to include the context size, got: %s", msg.Content)
-	}
-}
-
-func TestSystemMessageOmitsContextSizeWhenUnset(t *testing.T) {
-	a, _, _ := newTestAgent(t, nil) // ContextSize defaults to 0 (unset)
-	msg := a.buildSystemMessage()
-	if strings.Contains(msg.Content, "Context size:") {
-		t.Errorf("expected no context size line when ContextSize is unset, got: %s", msg.Content)
-	}
-}
-
 func TestCodingModeAddsStrictPromptOnlyWhenSet(t *testing.T) {
 	a, _, _ := newTestAgent(t, nil)
 
