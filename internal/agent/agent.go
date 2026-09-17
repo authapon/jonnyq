@@ -63,6 +63,7 @@ You are working through a task checklist with no human reviewing each step befor
 4. If you don't already know how to build or test this project, find out first (check for a Makefile, package.json, go.mod, Cargo.toml, README, CI config, etc.) rather than guessing or skipping verification.
 5. If a task genuinely has nothing to build or test (e.g. a documentation-only change), say so explicitly in your reply instead of silently marking it done with no verification.
 6. Never state or imply a task is verified, working, or tested unless you have real tool output from this turn proving it.
+7. If you notice yourself repeating the same plan or reasoning without taking a new concrete action, stop immediately and call a tool (e.g. run_command, read_file) to make real progress, instead of continuing to reason in text.
 `
 
 func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool, contextSize, maxToolCallsPerTurn int, w *ui.Writer, skillPaths []string, contextFile string) *Agent {
@@ -132,7 +133,13 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 
 	for {
 		messages := append([]llm.Message{systemMsg}, a.History...)
-		events, err := a.Provider.Chat(ctx, llm.ChatRequest{
+
+		// Each Chat call gets its own cancellable context so a detected
+		// repetition loop can abort just that in-flight request without
+		// touching the turn's overall ctx (which callers still use for
+		// Ctrl-C).
+		chatCtx, cancelChat := context.WithCancel(ctx)
+		events, err := a.Provider.Chat(chatCtx, llm.ChatRequest{
 			Model:       a.Model,
 			Messages:    messages,
 			Tools:       a.Tools.Specs(),
@@ -140,6 +147,7 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 			ContextSize: a.ContextSize,
 		})
 		if err != nil {
+			cancelChat()
 			return err
 		}
 
@@ -147,23 +155,59 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 		var assistantContent strings.Builder
 		var roundUsage llm.Usage
 		gotDone := false
+		loopDetected := false
+		var thinkingRepeat, contentRepeat repeatDetector
 
 		for ev := range events {
 			switch ev.Kind {
 			case llm.EventThinking:
+				if loopDetected {
+					continue
+				}
 				a.UI.Thinking(ev.Delta)
+				if thinkingRepeat.Add(ev.Delta) {
+					loopDetected = true
+					cancelChat()
+				}
 			case llm.EventContent:
+				if loopDetected {
+					continue
+				}
 				a.UI.Answer(ev.Delta)
 				assistantContent.WriteString(ev.Delta)
 				finalAnswer.WriteString(ev.Delta)
+				if contentRepeat.Add(ev.Delta) {
+					loopDetected = true
+					cancelChat()
+				}
 			case llm.EventToolCalls:
-				pendingCalls = append(pendingCalls, ev.ToolCalls...)
+				if !loopDetected {
+					pendingCalls = append(pendingCalls, ev.ToolCalls...)
+				}
 			case llm.EventError:
+				if loopDetected {
+					// Expected: our own cancellation surfacing as a stream
+					// error. Treat it the same as a clean end below.
+					continue
+				}
+				cancelChat()
 				return ev.Err
 			case llm.EventDone:
 				roundUsage = ev.Usage
 				gotDone = true
 			}
+		}
+		cancelChat()
+
+		if loopDetected {
+			a.UI.Meta("[repetitive output detected; response cut short]")
+			a.History = append(a.History, llm.Message{
+				Role:    llm.RoleAssistant,
+				Content: "[cut short: this response started repeating the same reasoning without making progress]",
+			})
+			finalAnswer.WriteString("[cut short: repetitive output detected]")
+			totalUsage = sumUsage(totalUsage, roundUsage)
+			break
 		}
 		if !gotDone {
 			return fmt.Errorf("provider stream ended without a completion event")

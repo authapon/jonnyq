@@ -133,6 +133,52 @@ func TestRunTurnExecutesToolCallThenFinalAnswer(t *testing.T) {
 	}
 }
 
+// TestRunTurnDetectsRepetitionLoopAndCutsShort reproduces a real /autocoding
+// failure: the model alternated between two near-identical sentences
+// indefinitely, in plain content text, without ever calling a tool. Before
+// this fix, RunTurn had no way to notice and would just keep printing and
+// accumulating the repeated text as if it were a normal answer.
+func TestRunTurnDetectsRepetitionLoopAndCutsShort(t *testing.T) {
+	sentenceA := "Wait, I'll try to use `golang:1.23-bullseye` in the Dockerfile to see if it resolves any dependency issues, and I'll also ensure `go.mod` is correctly set.\n\n"
+	sentenceB := "Actually, I'll just try to fix `go.mod` one more time very carefully.\n\n"
+	var events []llm.ChatEvent
+	for i := 0; i < 6; i++ {
+		events = append(events,
+			llm.ChatEvent{Kind: llm.EventContent, Delta: sentenceA},
+			llm.ChatEvent{Kind: llm.EventContent, Delta: sentenceB},
+		)
+	}
+	events = append(events, llm.ChatEvent{Kind: llm.EventDone})
+
+	a, _, outFile := newTestAgent(t, [][]llm.ChatEvent{events})
+
+	if err := a.RunTurn(context.Background(), "fix the docker build"); err != nil {
+		t.Fatalf("RunTurn should recover from a detected loop without erroring, got: %v", err)
+	}
+
+	if len(a.History) == 0 {
+		t.Fatal("expected an assistant entry in history")
+	}
+	last := a.History[len(a.History)-1]
+	if last.Role != llm.RoleAssistant {
+		t.Fatalf("expected the last history entry to be from the assistant, got role %q", last.Role)
+	}
+	if strings.Contains(last.Content, "bullseye") {
+		t.Errorf("expected the repeated garbage NOT to be stored verbatim in history, got: %s", last.Content)
+	}
+	if !strings.Contains(last.Content, "cut short") {
+		t.Errorf("expected a clear cut-short marker in history, got: %s", last.Content)
+	}
+
+	logData, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "repetitive output detected") {
+		t.Errorf("expected a user-visible notice about the detected loop, got: %s", logData)
+	}
+}
+
 func TestRunTurnNoModelSet(t *testing.T) {
 	a, _, _ := newTestAgent(t, nil)
 	a.Model = ""
