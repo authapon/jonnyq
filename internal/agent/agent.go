@@ -85,6 +85,10 @@ func (a *Agent) buildSystemMessage() llm.Message {
 	sb.WriteString("You are jonnyq, a coding agent with tool access. Current date and time: ")
 	sb.WriteString(now)
 	sb.WriteString("\n")
+	fmt.Fprintf(&sb, "Model: %s\n", a.Model)
+	if a.ContextSize > 0 {
+		fmt.Fprintf(&sb, "Context size: %d\n", a.ContextSize)
+	}
 	skills := skill.Discover(a.SkillPaths)
 	if len(skills) > 0 {
 		sb.WriteString("Available skills (use read_skill with a name below to load its full content):\n")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -107,13 +108,16 @@ func TestRunTurnExecutesToolCallThenFinalAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := string(logData)
-	if !strings.Contains(log, "Tool call\necho({\"text\":\"hi\"})") {
+	// Section headers carry a "(YYYY-MM-DD HH:MM:SS)" timestamp appended by
+	// ui.Writer, so match around it instead of an exact string.
+	timestamp := `\(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\)`
+	if !regexp.MustCompile(`Tool call ` + timestamp + `\necho\(\{"text":"hi"\}\)`).MatchString(log) {
 		t.Errorf("expected tool call section header + call to be logged, got: %s", log)
 	}
-	if !strings.Contains(log, "Answer\nall done") {
+	if !regexp.MustCompile(`Answer ` + timestamp + `\nall done`).MatchString(log) {
 		t.Errorf("expected answer section header + text to be logged, got: %s", log)
 	}
-	if !strings.Contains(log, "\nTool call\n") || !strings.Contains(log, "\nAnswer\n") {
+	if !regexp.MustCompile(`\nTool call `+timestamp).MatchString(log) || !regexp.MustCompile(`\n\nAnswer `+timestamp).MatchString(log) {
 		t.Errorf("expected blank-line-separated section headers in log, got: %s", log)
 	}
 	if !strings.Contains(log, "token_in=13") || !strings.Contains(log, "token_out=3") || !strings.Contains(log, "total_token=16") {
@@ -134,6 +138,28 @@ func TestRunTurnNoModelSet(t *testing.T) {
 	a.Model = ""
 	if err := a.RunTurn(context.Background(), "hi"); err == nil {
 		t.Error("expected error when no model is set")
+	}
+}
+
+func TestSystemMessageIncludesModelAndContextSize(t *testing.T) {
+	a, _, _ := newTestAgent(t, nil)
+	a.Model = "llama3:70b"
+	a.ContextSize = 8192
+
+	msg := a.buildSystemMessage()
+	if !strings.Contains(msg.Content, "Model: llama3:70b") {
+		t.Errorf("expected system message to include the model name, got: %s", msg.Content)
+	}
+	if !strings.Contains(msg.Content, "Context size: 8192") {
+		t.Errorf("expected system message to include the context size, got: %s", msg.Content)
+	}
+}
+
+func TestSystemMessageOmitsContextSizeWhenUnset(t *testing.T) {
+	a, _, _ := newTestAgent(t, nil) // ContextSize defaults to 0 (unset)
+	msg := a.buildSystemMessage()
+	if strings.Contains(msg.Content, "Context size:") {
+		t.Errorf("expected no context size line when ContextSize is unset, got: %s", msg.Content)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -96,12 +97,13 @@ func (w *Writer) Print(color, text string) {
 func (w *Writer) Println(color, text string) { w.Print(color, text+"\n") }
 
 // startSection prints a blank separator line and a bold, bright-colored
-// header label the first time it's called for a new kind of section;
-// repeated calls for the same still-current section are a no-op so streamed
-// chunks don't each get their own header. Streamed body text rarely ends in
-// a newline, so this first finishes the current line (if needed) before
-// inserting the actual blank line - a single "\n" alone would just end the
-// current line rather than produce visible separation.
+// header label (with the current date/time in parentheses, marking when
+// this section started) the first time it's called for a new kind of
+// section; repeated calls for the same still-current section are a no-op so
+// streamed chunks don't each get their own header. Streamed body text
+// rarely ends in a newline, so this first finishes the current line (if
+// needed) before inserting the actual blank line - a single "\n" alone
+// would just end the current line rather than produce visible separation.
 func (w *Writer) startSection(s section, bright, label string) {
 	if w.current == s {
 		return
@@ -111,12 +113,13 @@ func (w *Writer) startSection(s section, bright, label string) {
 		w.Plain("\n")
 	}
 	w.Plain("\n")
+	stamped := fmt.Sprintf("%s (%s)", label, time.Now().Format("2006-01-02 15:04:05"))
 	if w.colorOut {
-		fmt.Fprint(w.out, ColorBold, bright, label, ColorReset, "\n")
+		fmt.Fprint(w.out, ColorBold, bright, stamped, ColorReset, "\n")
 	} else {
-		fmt.Fprint(w.out, label, "\n")
+		fmt.Fprint(w.out, stamped, "\n")
 	}
-	fmt.Fprint(w.log, label, "\n")
+	fmt.Fprint(w.log, stamped, "\n")
 	w.atLineStart = true
 }
 
