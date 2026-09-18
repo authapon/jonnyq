@@ -26,6 +26,8 @@ const (
 	DefaultThinking             = true
 	DefaultRunCommandTimeoutSec = 300
 	DefaultMaxToolCallsPerTurn  = 50
+	DefaultWatchMagicWord       = "AI!"
+	DefaultWatchPollIntervalSec = 1
 )
 
 // Config holds all runtime settings for jonnyq.
@@ -50,6 +52,9 @@ type Config struct {
 
 	RunCommandTimeoutSec int
 	MaxToolCallsPerTurn  int
+
+	WatchMagicWord       string
+	WatchPollIntervalSec int
 
 	SkillPaths []string
 
@@ -120,6 +125,8 @@ func Load(args []string) (*Config, error) {
 	pdfDPI := fs.Int("pdf-dpi", envInt("PDF_DPI", DefaultPDFDPI), "PDF render DPI")
 	runCommandTimeoutSec := fs.Int("run-command-timeout-sec", envInt("RUN_COMMAND_TIMEOUT_SEC", DefaultRunCommandTimeoutSec), "run_command timeout seconds")
 	maxToolCallsPerTurn := fs.Int("max-tool-calls-per-turn", envInt("MAX_TOOL_CALLS_PER_TURN", DefaultMaxToolCallsPerTurn), "max tool calls allowed within a single turn")
+	watchMagicWord := fs.String("watch-magic-word", envString("WATCH_MAGIC_WORD", DefaultWatchMagicWord), "magic word /watchfile scans for in changed files")
+	watchPollIntervalSec := fs.Int("watch-poll-interval-sec", envInt("WATCH_POLL_INTERVAL_SEC", DefaultWatchPollIntervalSec), "/watchfile polling interval in seconds")
 	skillPath := fs.String("skill-path", skillPathStr, "semicolon-separated skill directories")
 	thinking := fs.Bool("thinking", envBool("THINKING", DefaultThinking), "enable model thinking")
 
@@ -144,6 +151,8 @@ func Load(args []string) (*Config, error) {
 	c.PDFDPI = *pdfDPI
 	c.RunCommandTimeoutSec = *runCommandTimeoutSec
 	c.MaxToolCallsPerTurn = *maxToolCallsPerTurn
+	c.WatchMagicWord = *watchMagicWord
+	c.WatchPollIntervalSec = *watchPollIntervalSec
 	c.Thinking = *thinking
 	if *skillPath != "" {
 		for _, p := range strings.Split(*skillPath, ";") {

@@ -17,6 +17,7 @@ Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, �
 - ตรวจจับ**การคิดวนซ้ำ** (บาง local model ผ่าน backend อย่าง llama.cpp บางครั้งจะวนพูดประโยคเดิม ๆ ซ้ำ ๆ ในคำตอบโดยไม่เรียก tool หรือสรุปจบ) ถ้าพบบรรทัด/ย่อหน้าเดิมซ้ำเกิน 3 ครั้งในช่วงสั้น ๆ จะตัด response นั้นทิ้งทันที (ยกเลิก request ที่ค้างอยู่) แล้วบันทึกลง history เป็นข้อความสั้น ๆ แทนขยะที่วนซ้ำ พร้อมแจ้งเตือนในหน้าจอ — ทำให้ turn จบแบบปกติ (ไม่ error) แล้วปล่อยให้กลไก retry/stall เดิมของ `/coding`, `/autocoding` จัดการลองใหม่ต่อไป
 - system prompt (ทุกโหมด ไม่ใช่แค่ coding) กำชับให้ model **คิดแบบเด็ดขาดและกระชับ**: ตัดสินใจแล้วลงมือทำ ไม่วนคิดเรื่องเดิมหรือพูดแผนซ้ำ ๆ หลีกเลี่ยงการให้เหตุผลที่ยืดเยื้อ แต่ต้องไม่แลกความถูกต้องกับความเร็ว — ยังต้องตรวจสอบสิ่งที่ไม่แน่ใจด้วย tool ก่อนสรุปเป็นข้อเท็จจริงเสมอ (เสริมกับกลไกตัดจบ loop ด้านบน คนละจุดกัน: อันนี้ลดโอกาสเกิด loop ตั้งแต่ต้น ส่วนตัวตรวจจับ loop จัดการตอนมันเกิดขึ้นแล้ว)
 - ถ้าเจอ task เดิมค้างซ้ำ (ยัง `- [ ]` อยู่ใน `.progress` ทั้งที่ทำมาแล้วรอบหนึ่ง มักเกิดจาก `edit_file` ก่อนหน้าไม่ match exact text หรือ `write_file` เขียนทับทั้งไฟล์จาก context เก่าที่ยังไม่ทันอัปเดต) ตั้งแต่รอบที่ 2 เป็นต้นไป prompt จะแนบข้อความชี้ให้ model รู้ตัวว่า task นี้ยังไม่ถูกติ๊กจริงบนไฟล์ ให้ไป `read_file` เช็คของจริงก่อน แทนที่จะเชื่อความจำตัวเองแล้วอ้างว่าทำเสร็จไปแล้วซ้ำ ๆ — `/coding` เก็บตัวนับนี้ไว้ในไฟล์ `.progress.retry` เพราะแต่ละครั้งที่เรียกเป็นคนละ process/turn กัน ไม่มี loop ในหน่วยความจำให้จำต่อกันแบบ `/autocoding`
+- **Pair programming ผ่าน `/watchfile`**: `/watchfile [<magic word>|off]` (default magic word `AI!`, ตั้งค่าเริ่มต้นได้ผ่าน `-watch-magic-word`/`JONNYQ_WATCH_MAGIC_WORD`) เปิดการ poll working directory เป็นระยะ (`-watch-poll-interval-sec`/`JONNYQ_WATCH_POLL_INTERVAL_SEC`, default 1 วินาที, stdlib-only ไม่ใช้ fsnotify) เมื่อไฟล์ถูกแก้ไขแล้วมีบรรทัดที่มี magic word (เช่น `// AI! เพิ่ม error handling ตรงนี้`) จะส่งบรรทัดนั้นเป็น prompt ให้ agent ไปอ่านโค้ดรอบ ๆ แล้วดำเนินการตามคำสั่ง โดยจะข้าม dotfile/dot-directory ทั้งหมด (`.git`, `.context`, `.progress*` ฯลฯ) รวมถึง `node_modules`/`vendor` และ**ไฟล์ log ของตัวเอง (`-output`)** เสมอ เพื่อไม่ให้ transcript ที่สะท้อน trigger กลับเข้ามาใน working directory ย้อนมา trigger ตัวเองซ้ำไม่รู้จบ — บรรทัดที่เคย trigger แล้วจะไม่ trigger ซ้ำจนกว่าเนื้อหาบรรทัดนั้นจะเปลี่ยน แก้ magic word ระหว่างที่กำลัง watch อยู่ได้ทันทีโดยไม่ต้อง restart การ watch
 
 ## ความปลอดภัย (โดยตั้งใจ)
 
@@ -105,6 +106,8 @@ go test ./...
 | `-max-tool-calls-per-turn` | `JONNYQ_MAX_TOOL_CALLS_PER_TURN` | `50` | จำนวน tool call สูงสุดที่ยอมให้เรียกภายใน 1 รอบ prompt (safety valve กัน tool-call loop วนไม่รู้จบ) |
 | `-skill-path` | `JONNYQ_SKILL_PATH` | (ว่าง) | path ของ skill คั่นด้วย `;` ได้หลายอัน |
 | `-thinking` | `JONNYQ_THINKING` | `true` | เปิด/ปิด model thinking |
+| `-watch-magic-word` | `JONNYQ_WATCH_MAGIC_WORD` | `AI!` | magic word ที่ `/watchfile` (ไม่ใส่ argument) ใช้ scan หา |
+| `-watch-poll-interval-sec` | `JONNYQ_WATCH_POLL_INTERVAL_SEC` | `1` | ความถี่ในการ poll working directory ของ `/watchfile` (วินาที) |
 
 ตัวอย่างการรัน:
 
@@ -130,6 +133,7 @@ JONNYQ_MODEL=llama3 ./jonnyq
 | `/plan` | สร้าง `.progress` จาก `requirements.md` ถ้ายังไม่มี หรือ reconcile ถ้า `requirements.md` เปลี่ยนไปแล้ว (เช็คความสอดคล้องกับโค้ดที่มีด้วย) — ไม่เขียนโค้ดใด ๆ |
 | `/coding` | ทำ task แรกที่ยังไม่เสร็จใน `.progress` **แค่ 1 ข้อแล้วหยุด** (ต้องมี `.progress` อยู่แล้ว ถ้ายังไม่มีให้สั่ง `/plan` ก่อน) |
 | `/autocoding` | พฤติกรรมเดิมของ `/coding` ก่อนแยกคำสั่ง: เรียก `/plan` ให้อัตโนมัติถ้าจำเป็น แล้วไล่ทำทุก task ใน `.progress` รวดเดียวจนครบ |
+| `/watchfile [<word>\|off]` | ไม่มี argument: เริ่ม/หยุด watch สลับกัน (toggle) ด้วย magic word ปัจจุบัน; ใส่ magic word: ตั้ง/เริ่ม watch ด้วยคำนั้น (ถ้ากำลัง watch อยู่แล้วจะเปลี่ยนคำแบบ live ไม่ restart); `off`/`stop`: หยุด watch ชัดเจน |
 | `/exit`, `/bye` | ออกจากโปรแกรม |
 
 ถ้ายังไม่ได้ตั้ง `-model`/`JONNYQ_MODEL` โปรแกรมจะแจ้งเตือนก่อนแสดง prompt และรับได้เฉพาะ slash command เท่านั้น จนกว่าจะสั่ง `/model <name>`
@@ -171,5 +175,6 @@ internal/agent/    tool-calling loop, .context, compaction, metrics
 internal/repl/     prompt loop + slash commands
 internal/skill/    skill discovery
 internal/coding/   /plan, /coding, /autocoding automation + .progress
+internal/watch/    /watchfile: poll working directory หา magic word (stdlib-only, ไม่ใช้ fsnotify)
 internal/ui/       สีของ terminal + log แบบ plain text
 ```

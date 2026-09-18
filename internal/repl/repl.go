@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"jonnyq/internal/agent"
 	"jonnyq/internal/coding"
@@ -17,6 +18,7 @@ import (
 	"jonnyq/internal/llm"
 	"jonnyq/internal/tools"
 	"jonnyq/internal/ui"
+	"jonnyq/internal/watch"
 )
 
 const helpText = `Slash commands:
@@ -32,6 +34,7 @@ const helpText = `Slash commands:
   /plan                             generate/reconcile .progress from requirements.md, checked against the codebase (no coding)
   /coding                           work on the next unfinished task in .progress, then stop (Ctrl-C cancels)
   /autocoding                       plan if needed, then work through every task in .progress in one run (Ctrl-C cancels)
+  /watchfile [<word>|off]           watch the working directory for a magic word (default "AI!") and act on it when found
   /exit  /bye                       exit jonnyq
 
 Multi-line prompts: end a line with a trailing backslash to continue it on
@@ -47,8 +50,9 @@ type REPL struct {
 	UI         *ui.Writer
 	RunCommand *tools.RunCommandTool
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	watcher *watch.Watcher
 }
 
 func New(cfg *config.Config, ag *agent.Agent, w *ui.Writer, runCommand *tools.RunCommandTool) *REPL {
@@ -56,7 +60,10 @@ func New(cfg *config.Config, ag *agent.Agent, w *ui.Writer, runCommand *tools.Ru
 }
 
 // Run reads prompts from stdin until /exit or EOF (Ctrl-D). Ctrl-C cancels
-// whichever turn is currently in flight without exiting the REPL.
+// whichever turn is currently in flight without exiting the REPL. While
+// /watchfile is active, a file change carrying the magic word is handled as
+// an extra turn interleaved with typed prompts - both flow through the same
+// single-threaded loop below, so there's no concurrent access to Agent/UI.
 func (r *REPL) Run(ctx context.Context) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
@@ -71,20 +78,61 @@ func (r *REPL) Run(ctx context.Context) error {
 		}
 	}()
 
+	defer func() {
+		if r.watcher != nil {
+			r.watcher.Stop()
+		}
+	}()
+
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	stdinLines := make(chan string)
+	go func() {
+		defer close(stdinLines)
+		for {
+			raw, ok := readInput(scanner)
+			if !ok {
+				return
+			}
+			stdinLines <- raw
+		}
+	}()
+
+	watchTriggers := make(chan watch.Trigger, 32)
 
 	for {
 		if r.Cfg.Model == "" {
 			r.UI.Plainln("model is not set; use /model <name> (only slash commands are accepted until then)")
 		}
 		r.UI.Plain(r.promptString())
-		raw, ok := readInput(scanner)
-		if !ok {
+
+		var line string
+		select {
+		case raw, ok := <-stdinLines:
+			if !ok {
+				r.UI.Plainln("")
+				return nil
+			}
+			line = strings.TrimSpace(raw)
+
+		case trig := <-watchTriggers:
 			r.UI.Plainln("")
-			return nil
+			r.UI.Plainln(fmt.Sprintf("[watchfile] %s:%d: %s", trig.File, trig.Line, trig.Text))
+			if r.Cfg.Model == "" {
+				r.UI.Plainln("no model set; skipping watchfile trigger")
+				continue
+			}
+			prompt := fmt.Sprintf(
+				"A magic-word trigger (%q) was found in %s at line %d:\n\n    %s\n\n"+
+					"Read the surrounding code in %s for context, then carry out the instruction on that line. "+
+					"Once you're done, edit %s to remove or update that line (e.g. delete the trigger marker) so it doesn't fire again.",
+				r.watcherMagicWord(), trig.File, trig.Line, trig.Text, trig.File, trig.File,
+			)
+			r.runCancellable(ctx, func(c context.Context) (bool, error) { return false, r.Agent.RunTurn(c, prompt) })
+			continue
 		}
-		line := strings.TrimSpace(raw)
+
 		if line == "" {
 			continue
 		}
@@ -95,45 +143,58 @@ func (r *REPL) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Both slash commands (e.g. /coding, /list_model) and plain prompts
-		// run under a cancellable context so Ctrl-C can interrupt either.
-		turnCtx, cancel := context.WithCancel(ctx)
-		r.mu.Lock()
-		r.cancel = cancel
-		r.mu.Unlock()
-
-		var err error
-		exit := false
 		if isSlash {
-			exit, err = r.handleSlash(turnCtx, line)
-		} else {
-			err = r.Agent.RunTurn(turnCtx, line)
-		}
-		wasCancelled := turnCtx.Err() != nil
-
-		r.mu.Lock()
-		r.cancel = nil
-		r.mu.Unlock()
-		cancel()
-
-		if exit {
-			return nil
-		}
-		if err != nil {
-			if wasCancelled {
-				r.UI.Meta("[cancelled]")
-			} else {
-				r.UI.Plainln("error: " + err.Error())
+			exit := r.runCancellable(ctx, func(c context.Context) (bool, error) { return r.handleSlash(c, line, watchTriggers) })
+			if exit {
+				return nil
 			}
+			continue
+		}
+
+		r.runCancellable(ctx, func(c context.Context) (bool, error) { return false, r.Agent.RunTurn(c, line) })
+	}
+}
+
+// runCancellable runs fn under a fresh cancellable child of ctx (wired to
+// Ctrl-C via r.cancel), reports "[cancelled]" or the returned error
+// afterward, and returns fn's exit flag (only meaningful for slash
+// commands; plain turns and watch triggers always pass false).
+func (r *REPL) runCancellable(ctx context.Context, fn func(context.Context) (exit bool, err error)) bool {
+	turnCtx, cancel := context.WithCancel(ctx)
+	r.mu.Lock()
+	r.cancel = cancel
+	r.mu.Unlock()
+
+	exit, err := fn(turnCtx)
+	wasCancelled := turnCtx.Err() != nil
+
+	r.mu.Lock()
+	r.cancel = nil
+	r.mu.Unlock()
+	cancel()
+
+	if err != nil {
+		if wasCancelled {
+			r.UI.Meta("[cancelled]")
+		} else {
+			r.UI.Plainln("error: " + err.Error())
 		}
 	}
+	return exit
+}
+
+func (r *REPL) watcherMagicWord() string {
+	if r.watcher != nil {
+		return r.watcher.MagicWord()
+	}
+	return r.Cfg.WatchMagicWord
 }
 
 // handleSlash processes one slash command. It returns (exit, error); exit is
 // true if the REPL should exit. Commands that already reported their own
 // error print it directly and return a nil error so the caller doesn't
 // double-report it.
-func (r *REPL) handleSlash(ctx context.Context, line string) (bool, error) {
+func (r *REPL) handleSlash(ctx context.Context, line string, watchTriggers chan<- watch.Trigger) (bool, error) {
 	fields := strings.Fields(line)
 	cmd := fields[0]
 	rest := strings.TrimSpace(strings.TrimPrefix(line, cmd))
@@ -257,10 +318,55 @@ func (r *REPL) handleSlash(ctx context.Context, line string) (bool, error) {
 		}
 		return false, coding.AutoRun(ctx, r.Agent, r.UI, ".")
 
+	case "/watchfile":
+		r.toggleWatch(rest, watchTriggers)
+
 	default:
 		r.UI.Plainln("unknown command " + cmd + "; try /help")
 	}
 	return false, nil
+}
+
+// toggleWatch implements /watchfile: bare (not watching) starts watching
+// with the current magic word, bare (already watching) or "off"/"stop"
+// stops, and a word argument sets the magic word (starting watching if
+// needed, or updating it live if already watching).
+func (r *REPL) toggleWatch(arg string, watchTriggers chan<- watch.Trigger) {
+	arg = strings.TrimSpace(arg)
+	lower := strings.ToLower(arg)
+
+	if lower == "off" || lower == "stop" || (arg == "" && r.watcher != nil) {
+		if r.watcher == nil {
+			r.UI.Plainln("[watchfile] not watching")
+			return
+		}
+		r.watcher.Stop()
+		r.watcher = nil
+		r.UI.Plainln("[watchfile] stopped")
+		return
+	}
+
+	if arg != "" {
+		r.Cfg.WatchMagicWord = arg
+	}
+	if r.Cfg.WatchMagicWord == "" {
+		r.UI.Plainln("usage: /watchfile [<magic word>|off]")
+		return
+	}
+
+	if r.watcher != nil {
+		r.watcher.SetMagicWord(r.Cfg.WatchMagicWord)
+		r.UI.Plainln(fmt.Sprintf("[watchfile] magic word updated to %q (still watching)", r.Cfg.WatchMagicWord))
+		return
+	}
+
+	interval := time.Duration(r.Cfg.WatchPollIntervalSec) * time.Second
+	if interval <= 0 {
+		interval = time.Second
+	}
+	r.watcher = watch.New(".", r.Cfg.WatchMagicWord, interval, r.Cfg.OutputFile)
+	r.watcher.Start(watchTriggers)
+	r.UI.Plainln(fmt.Sprintf("[watchfile] watching the working directory for %q", r.Cfg.WatchMagicWord))
 }
 
 func (r *REPL) rebuildProvider() error {
