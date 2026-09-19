@@ -205,6 +205,60 @@ func TestCodingModeAddsStrictPromptOnlyWhenSet(t *testing.T) {
 	}
 }
 
+// TestRunTurnCompactsMidTurnWhenHistoryGrowsLarge reproduces the actual
+// cause of "prompt processing gets slow": a single long turn (e.g.
+// /autocoding grinding through many tasks) can pile up a lot of tool
+// call/result content well before it returns, so compaction must fire
+// during the turn, not only afterward. With a tiny ContextSize, one large
+// tool round should already push History over the compaction threshold.
+func TestRunTurnCompactsMidTurnWhenHistoryGrowsLarge(t *testing.T) {
+	bigArg := strings.Repeat("x", 200)
+	responses := [][]llm.ChatEvent{
+		{ // round 1: a tool call with a large argument
+			{Kind: llm.EventToolCalls, ToolCalls: []llm.ToolCall{{ID: "call_1", Name: "echo", Arguments: `{"text":"` + bigArg + `"}`}}},
+			{Kind: llm.EventDone},
+		},
+		{ // compact()'s own summarization call, triggered mid-turn
+			{Kind: llm.EventContent, Delta: "compacted summary"},
+			{Kind: llm.EventDone},
+		},
+		{ // round 2: model sees the compacted history and finishes
+			{Kind: llm.EventContent, Delta: "final answer"},
+			{Kind: llm.EventDone},
+		},
+	}
+	a, _, outFile := newTestAgent(t, responses)
+	// Small enough that the ~440-char tool round crosses the compaction
+	// threshold, but large enough that the ~65-char post-compaction history
+	// (summary + final answer) doesn't trigger a second compaction call.
+	a.ContextSize = 100
+
+	if err := a.RunTurn(context.Background(), "do the big thing"); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+
+	if len(a.History) != 2 {
+		t.Fatalf("expected History to be [summary, final answer] after mid-turn compaction, got %d entries: %+v", len(a.History), a.History)
+	}
+	if a.History[0].Role != llm.RoleSystem || !strings.Contains(a.History[0].Content, "Summary of earlier conversation") {
+		t.Errorf("expected first entry to be the compaction summary, got: %+v", a.History[0])
+	}
+	if a.History[1].Role != llm.RoleAssistant || a.History[1].Content != "final answer" {
+		t.Errorf("expected final answer after the summary, got: %+v", a.History[1])
+	}
+	if strings.Contains(a.History[0].Content+a.History[1].Content, bigArg) {
+		t.Errorf("expected the large tool argument to have been summarized away, got: %+v", a.History)
+	}
+
+	logData, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "[context compacted]") {
+		t.Errorf("expected a compaction notice in the log, got: %s", logData)
+	}
+}
+
 func TestSystemMessageAlwaysIncludesDecisiveThinkingDirective(t *testing.T) {
 	a, _, _ := newTestAgent(t, nil)
 

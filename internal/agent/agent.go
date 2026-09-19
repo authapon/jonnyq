@@ -19,9 +19,23 @@ import (
 	"jonnyq/internal/ui"
 )
 
-// compactEvery is how many completed user turns accumulate before the
-// conversation history is summarized and replaced, per spec.
-const compactEvery = 20
+// approxCharsPerToken is a rough, tokenizer-free heuristic (no real
+// tokenizer is wired in) used only to decide when History has grown large
+// enough to compact - it doesn't need to be exact, just good enough to keep
+// the prompt well clear of ContextSize before growth actually slows things
+// down.
+const approxCharsPerToken = 4
+
+// compactHeadroomFraction is how much of ContextSize (converted to an
+// estimated character budget) History is allowed to reach before
+// compaction kicks in, leaving room for the system message, tool specs,
+// and the model's own reply.
+const compactHeadroomFraction = 0.6
+
+// fallbackContextSize is the character-budget basis used when ContextSize
+// is left unset (<= 0), so proactive compaction still has something to
+// measure against.
+const fallbackContextSize = 8192
 
 // DefaultMaxToolCallsPerTurn is the fallback used when MaxToolCallsPerTurn
 // is left unset (<= 0). It's a runaway-loop safety valve: it caps total
@@ -45,8 +59,7 @@ type Agent struct {
 	// a much stricter verify-before-done standard than ordinary chat.
 	CodingMode bool
 
-	History            []llm.Message
-	roundsSinceCompact int
+	History []llm.Message
 }
 
 // decisiveThinkingPrompt is included in every system message, regardless of
@@ -258,6 +271,15 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 				Name:       tc.Name,
 			})
 		}
+
+		// Check after every tool round, not just at the end of the turn: a
+		// single turn (e.g. /autocoding grinding through many tasks) can
+		// pile up a lot of tool call/result content long before it returns,
+		// and waiting for the turn to finish would let prompts stay bloated
+		// for the whole run.
+		if a.shouldCompact() {
+			a.compact(ctx)
+		}
 		// Loop again so the model can see the tool results.
 	}
 
@@ -265,11 +287,37 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 	a.printMetrics(totalUsage, elapsed)
 	a.appendContextFile(userInput, finalAnswer.String())
 
-	a.roundsSinceCompact++
-	if a.roundsSinceCompact >= compactEvery {
+	if a.shouldCompact() {
 		a.compact(ctx)
 	}
 	return nil
+}
+
+// historyChars estimates History's size in characters, as a stand-in for
+// tokens (no real tokenizer is wired in).
+func (a *Agent) historyChars() int {
+	total := 0
+	for _, m := range a.History {
+		total += len(m.Content)
+		for _, tc := range m.ToolCalls {
+			total += len(tc.Name) + len(tc.Arguments)
+		}
+	}
+	return total
+}
+
+// shouldCompact reports whether History has grown large enough, relative to
+// ContextSize, that it should be summarized and replaced before the next
+// prompt is sent - this is what actually governs how slow prompt
+// processing gets, not the size of the .context log file (which is a
+// write-only transcript, never read back in; see appendContextFile).
+func (a *Agent) shouldCompact() bool {
+	budget := a.ContextSize
+	if budget <= 0 {
+		budget = fallbackContextSize
+	}
+	charBudget := float64(budget) * approxCharsPerToken * compactHeadroomFraction
+	return float64(a.historyChars()) > charBudget
 }
 
 func (a *Agent) printMetrics(u llm.Usage, wallClock time.Duration) {
@@ -306,12 +354,11 @@ func (a *Agent) appendContextFile(prompt, answer string) {
 	fmt.Fprintf(f, "=== %s ===\n> %s\n%s\n\n", time.Now().Format(time.RFC3339), prompt, answer)
 }
 
-// compact summarizes History into a single message and resets it, per the
-// spec's "compact every 20 rounds" rule. It resets the round counter even on
-// failure so a persistently failing summarization doesn't retry every turn.
+// compact summarizes History into a single message and resets it. Called
+// whenever shouldCompact reports History has grown too large relative to
+// ContextSize, rather than on a fixed turn count, so it also fires mid-turn
+// during a long run instead of only between turns.
 func (a *Agent) compact(ctx context.Context) {
-	defer func() { a.roundsSinceCompact = 0 }()
-
 	var transcript strings.Builder
 	for _, m := range a.History {
 		fmt.Fprintf(&transcript, "%s: %s\n", m.Role, m.Content)
