@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"jonnyq/internal/llm"
 	"jonnyq/internal/tools"
@@ -256,6 +257,51 @@ func TestRunTurnCompactsMidTurnWhenHistoryGrowsLarge(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "[context compacted]") {
 		t.Errorf("expected a compaction notice in the log, got: %s", logData)
+	}
+}
+
+// TestCompactEnforcesTargetSizeEvenIfModelIgnoresLengthInstruction guards
+// against a slow leak: compact() asks the model to keep its summary under
+// ~25% of the character budget, but a local model can simply ignore that
+// instruction. Without a hard cap, an oversized summary would sit close to
+// (or above) the compaction trigger again immediately, so a long session
+// would keep re-summarizing without ever actually shrinking History.
+func TestCompactEnforcesTargetSizeEvenIfModelIgnoresLengthInstruction(t *testing.T) {
+	verbose := strings.Repeat("lorem ipsum ", 100) // ~1200 chars, ignores any length request
+	responses := [][]llm.ChatEvent{
+		{
+			{Kind: llm.EventContent, Delta: verbose},
+			{Kind: llm.EventDone},
+		},
+	}
+	a, _, _ := newTestAgent(t, responses)
+	a.ContextSize = 100 // charBudget = 400, target = 100
+	a.History = []llm.Message{{Role: llm.RoleUser, Content: "some prior turn content"}}
+
+	a.compact(context.Background())
+
+	if len(a.History) != 1 {
+		t.Fatalf("expected History to be replaced with exactly one summary message, got %d: %+v", len(a.History), a.History)
+	}
+	target := int(float64(a.charBudget()) * compactTargetFraction)
+	if got := len(a.History[0].Content); got > target {
+		t.Errorf("expected compacted History capped at %d chars, got %d: %q", target, got, a.History[0].Content)
+	}
+	if strings.Contains(a.History[0].Content, verbose) {
+		t.Errorf("expected the verbose summary to have been truncated, got the full text retained")
+	}
+}
+
+func TestTruncateCharsKeepsValidUTF8(t *testing.T) {
+	s := strings.Repeat("สวัสดี", 50) // Thai text: multi-byte runes throughout
+	for max := 0; max < 40; max++ {
+		out := truncateChars(s, max)
+		if !utf8.ValidString(out) {
+			t.Fatalf("truncateChars(_, %d) produced invalid UTF-8: %q", max, out)
+		}
+		if len(out) > max && max > 0 {
+			t.Errorf("truncateChars(_, %d) returned %d bytes, want <= %d", max, len(out), max)
+		}
 	}
 }
 

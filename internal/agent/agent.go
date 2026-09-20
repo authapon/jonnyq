@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"jonnyq/internal/llm"
 	"jonnyq/internal/skill"
@@ -31,6 +32,17 @@ const approxCharsPerToken = 4
 // compaction kicks in, leaving room for the system message, tool specs,
 // and the model's own reply.
 const compactHeadroomFraction = 0.6
+
+// compactTargetFraction bounds how big the summary compact() produces is
+// allowed to be, as a fraction of the same character budget. Without a
+// cap, a verbose summary can land close to (or even above) the trigger
+// threshold above, so the very next tool round re-triggers compaction
+// again - repeatedly re-summarizing without ever actually shrinking
+// History over a long session. Left deliberately far below
+// compactHeadroomFraction so History stays small for a while after
+// compacting; the model can always re-read a file or re-run a command if
+// it needs detail the summary dropped.
+const compactTargetFraction = 0.25
 
 // fallbackContextSize is the character-budget basis used when ContextSize
 // is left unset (<= 0), so proactive compaction still has something to
@@ -306,18 +318,25 @@ func (a *Agent) historyChars() int {
 	return total
 }
 
+// charBudget estimates how many characters of History correspond to the
+// full ContextSize (falling back to fallbackContextSize when unset), as a
+// stand-in for tokens. compactHeadroomFraction/compactTargetFraction scale
+// this into the trigger and target sizes below.
+func (a *Agent) charBudget() int {
+	budget := a.ContextSize
+	if budget <= 0 {
+		budget = fallbackContextSize
+	}
+	return int(float64(budget) * approxCharsPerToken)
+}
+
 // shouldCompact reports whether History has grown large enough, relative to
 // ContextSize, that it should be summarized and replaced before the next
 // prompt is sent - this is what actually governs how slow prompt
 // processing gets, not the size of the .context log file (which is a
 // write-only transcript, never read back in; see appendContextFile).
 func (a *Agent) shouldCompact() bool {
-	budget := a.ContextSize
-	if budget <= 0 {
-		budget = fallbackContextSize
-	}
-	charBudget := float64(budget) * approxCharsPerToken * compactHeadroomFraction
-	return float64(a.historyChars()) > charBudget
+	return float64(a.historyChars()) > float64(a.charBudget())*compactHeadroomFraction
 }
 
 func (a *Agent) printMetrics(u llm.Usage, wallClock time.Duration) {
@@ -354,20 +373,27 @@ func (a *Agent) appendContextFile(prompt, answer string) {
 	fmt.Fprintf(f, "=== %s ===\n> %s\n%s\n\n", time.Now().Format(time.RFC3339), prompt, answer)
 }
 
-// compact summarizes History into a single message and resets it. Called
-// whenever shouldCompact reports History has grown too large relative to
-// ContextSize, rather than on a fixed turn count, so it also fires mid-turn
-// during a long run instead of only between turns.
+// compact summarizes History into a single message, bounded to roughly
+// compactTargetFraction of the character budget, and resets History to just
+// that message. Called whenever shouldCompact reports History has grown too
+// large relative to ContextSize, rather than on a fixed turn count, so it
+// also fires mid-turn during a long run instead of only between turns.
 func (a *Agent) compact(ctx context.Context) {
 	var transcript strings.Builder
 	for _, m := range a.History {
 		fmt.Fprintf(&transcript, "%s: %s\n", m.Role, m.Content)
 	}
 
+	target := int(float64(a.charBudget()) * compactTargetFraction)
 	req := llm.ChatRequest{
 		Model: a.Model,
 		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: "Summarize the conversation below concisely, preserving important facts, decisions, and open tasks. Reply with only the summary."},
+			{Role: llm.RoleSystem, Content: fmt.Sprintf(
+				"Summarize the conversation below concisely, preserving important facts, decisions, and open "+
+					"tasks. Keep the summary under about %d characters - omit exact file contents, long command "+
+					"output, or other verbatim detail; the agent can re-read a file or re-run a command later if it "+
+					"needs that detail again. Reply with only the summary.", target,
+			)},
 			{Role: llm.RoleUser, Content: transcript.String()},
 		},
 	}
@@ -386,6 +412,24 @@ func (a *Agent) compact(ctx context.Context) {
 			return
 		}
 	}
-	a.History = []llm.Message{{Role: llm.RoleSystem, Content: "Summary of earlier conversation:\n" + summary.String()}}
+	// Enforce the target regardless of how well the model followed the
+	// length instruction above - a verbose summary must not be allowed to
+	// leave History close to the trigger threshold again immediately.
+	content := truncateChars("Summary of earlier conversation:\n"+summary.String(), target)
+	a.History = []llm.Message{{Role: llm.RoleSystem, Content: content}}
 	a.UI.Meta("[context compacted]")
+}
+
+// truncateChars cuts s to at most maxBytes bytes, backing off to the
+// nearest earlier UTF-8 rune boundary so multi-byte characters (e.g. Thai
+// text) are never split into invalid UTF-8.
+func truncateChars(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
