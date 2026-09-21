@@ -33,7 +33,7 @@ func newTestREPL(t *testing.T) *REPL {
 	t.Cleanup(func() { w.Close() })
 
 	cfg := &config.Config{Model: "test-model", WatchMagicWord: "AI!", WatchPollIntervalSec: 1}
-	ag := agent.New(noopProvider{}, cfg.Model, tools.NewRegistry(), false, 0, 0, w, nil, filepath.Join(dir, ".context"))
+	ag := agent.New(noopProvider{}, cfg.Model, tools.NewRegistry(), false, 0, 0, w, nil)
 	rc := &tools.RunCommandTool{WorkDir: dir}
 	r := New(cfg, ag, w, rc)
 	t.Cleanup(func() {

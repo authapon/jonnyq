@@ -1,14 +1,13 @@
 // Package agent implements the tool-calling loop: send the conversation and
 // available tools to the provider, stream thinking/content back to the user,
 // execute any requested tool calls, and repeat until the model produces a
-// final answer. It also owns .context transcript persistence, periodic
-// context compaction, and the end-of-turn metrics footer.
+// final answer. It also owns periodic context compaction and the
+// end-of-turn metrics footer.
 package agent
 
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -64,7 +63,6 @@ type Agent struct {
 	Tools               *tools.Registry
 	SkillPaths          []string
 	UI                  *ui.Writer
-	ContextFile         string
 
 	// CodingMode, when true, appends codingModePrompt to the system message.
 	// /coding sets this for the duration of its run so the model is held to
@@ -103,7 +101,7 @@ You are working through a task checklist with no human reviewing each step befor
 7. If you notice yourself repeating the same plan or reasoning without taking a new concrete action, stop immediately and call a tool (e.g. run_command, read_file) to make real progress, instead of continuing to reason in text.
 `
 
-func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool, contextSize, maxToolCallsPerTurn int, w *ui.Writer, skillPaths []string, contextFile string) *Agent {
+func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool, contextSize, maxToolCallsPerTurn int, w *ui.Writer, skillPaths []string) *Agent {
 	return &Agent{
 		Provider:            provider,
 		Model:               model,
@@ -113,8 +111,17 @@ func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool
 		Tools:               reg,
 		SkillPaths:          skillPaths,
 		UI:                  w,
-		ContextFile:         contextFile,
 	}
+}
+
+// ResetHistory discards all conversation history, so the next RunTurn call
+// starts from a clean slate (just the system message and its own prompt).
+// Used by /autocoding to keep each task's prompt minimal instead of
+// carrying earlier tasks' (or the planning step's) conversation forward -
+// the model re-discovers whatever it needs for the new task via
+// read_file/run_command rather than relying on memory of past turns.
+func (a *Agent) ResetHistory() {
+	a.History = nil
 }
 
 func (a *Agent) buildSystemMessage() llm.Message {
@@ -167,7 +174,6 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 
 	var totalUsage llm.Usage
 	remainingToolBudget := maxToolCalls
-	var finalAnswer strings.Builder
 
 	for {
 		messages := append([]llm.Message{systemMsg}, a.History...)
@@ -213,7 +219,6 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 				}
 				a.UI.Answer(ev.Delta)
 				assistantContent.WriteString(ev.Delta)
-				finalAnswer.WriteString(ev.Delta)
 				if contentRepeat.Add(ev.Delta) {
 					loopDetected = true
 					cancelChat()
@@ -243,7 +248,6 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 				Role:    llm.RoleAssistant,
 				Content: "[cut short: this response started repeating the same reasoning without making progress]",
 			})
-			finalAnswer.WriteString("[cut short: repetitive output detected]")
 			totalUsage = sumUsage(totalUsage, roundUsage)
 			break
 		}
@@ -297,7 +301,6 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 
 	elapsed := time.Since(start)
 	a.printMetrics(totalUsage, elapsed)
-	a.appendContextFile(userInput, finalAnswer.String())
 
 	if a.shouldCompact() {
 		a.compact(ctx)
@@ -332,9 +335,7 @@ func (a *Agent) charBudget() int {
 
 // shouldCompact reports whether History has grown large enough, relative to
 // ContextSize, that it should be summarized and replaced before the next
-// prompt is sent - this is what actually governs how slow prompt
-// processing gets, not the size of the .context log file (which is a
-// write-only transcript, never read back in; see appendContextFile).
+// prompt is sent.
 func (a *Agent) shouldCompact() bool {
 	return float64(a.historyChars()) > float64(a.charBudget())*compactHeadroomFraction
 }
@@ -362,15 +363,6 @@ func (a *Agent) printMetrics(u llm.Usage, wallClock time.Duration) {
 		tokIn, tokOut, tokTotal, tps, wallClock.Round(time.Millisecond),
 	)
 	a.UI.Meta(msg)
-}
-
-func (a *Agent) appendContextFile(prompt, answer string) {
-	f, err := os.OpenFile(a.ContextFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	fmt.Fprintf(f, "=== %s ===\n> %s\n%s\n\n", time.Now().Format(time.RFC3339), prompt, answer)
 }
 
 // compact summarizes History into a single message, bounded to roughly

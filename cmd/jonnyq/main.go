@@ -53,8 +53,7 @@ func main() {
 	reg.Register(runCommandTool)
 	reg.Register(&tools.SkillTool{Paths: cfg.SkillPaths})
 
-	contextFile := ".context"
-	ag := agent.New(provider, cfg.Model, reg, cfg.Thinking, cfg.ContextSize, cfg.MaxToolCallsPerTurn, w, cfg.SkillPaths, contextFile)
+	ag := agent.New(provider, cfg.Model, reg, cfg.Thinking, cfg.ContextSize, cfg.MaxToolCallsPerTurn, w, cfg.SkillPaths)
 
 	r := repl.New(cfg, ag, w, runCommandTool)
 	if err := r.Run(context.Background()); err != nil {

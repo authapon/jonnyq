@@ -1,6 +1,5 @@
 /jonnyq
 output.txt
-.context
 .progress
 .progress.hash
 .progress.retry

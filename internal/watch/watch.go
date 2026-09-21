@@ -22,8 +22,8 @@ type Trigger struct {
 }
 
 // skipDirNames are directory basenames never descended into, on top of any
-// dotfile/dot-directory (which also covers jonnyq's own .git, .context,
-// .progress* state, and .jonnyq/ cache).
+// dotfile/dot-directory (which also covers jonnyq's own .git, .progress*
+// state, and .jonnyq/ cache).
 var skipDirNames = map[string]bool{
 	"node_modules": true,
 	"vendor":       true,

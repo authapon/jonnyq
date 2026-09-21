@@ -91,7 +91,7 @@ func newTestAgent(t *testing.T, dir string, provider llm.Provider) *agent.Agent 
 	reg.Register(&tools.ReadFileTool{WorkDir: dir})
 	reg.Register(&tools.EditFileTool{WorkDir: dir})
 
-	return agent.New(provider, "test-model", reg, false, 0, 0, w, nil, filepath.Join(dir, ".context"))
+	return agent.New(provider, "test-model", reg, false, 0, 0, w, nil)
 }
 
 // ---- Plan (/plan) ----
@@ -445,6 +445,54 @@ func TestAutoRunRetriesStuckTaskWithDiagnosticNote(t *testing.T) {
 	first := lastUserContent(p.sentReqs[0])
 	if strings.Contains(first, "already attempted") {
 		t.Errorf("did not expect the diagnostic note on the first attempt, got: %s", first)
+	}
+}
+
+// TestAutoRunResetsHistoryBeforeEachTask confirms each task starts from a
+// clean slate: none of the planning step's or an earlier task's own
+// conversation (tool calls, replies) leaks into a later task's prompt. This
+// keeps every task's prompt minimal instead of growing across the whole
+// run - the model is expected to re-discover whatever it needs via
+// read_file/run_command instead of relying on carried-over history.
+func TestAutoRunResetsHistoryBeforeEachTask(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, requirementsFile), []byte("build two things"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &sequenceProvider{t: t, steps: []step{
+		writeFileStep("- [ ] first task\n- [ ] second task\n"), contentStep("plan reply"), // Plan's generation turn
+		writeFileStep("- [x] first task\n- [ ] second task\n"), contentStep("task1 reply"), // first task
+		writeFileStep("- [x] first task\n- [x] second task\n"), contentStep("task2 reply"), // second task
+	}}
+	ag := newTestAgent(t, dir, p)
+
+	if err := AutoRun(context.Background(), ag, ag.UI, dir); err != nil {
+		t.Fatalf("AutoRun failed: %v", err)
+	}
+	if p.calls != 6 {
+		t.Fatalf("expected exactly 6 Chat calls, got %d", p.calls)
+	}
+
+	// Requests 5 and 6 (index 4, 5) are the second task's turn. Neither of
+	// its messages should carry the planning step's or the first task's own
+	// reply text forward.
+	for _, idx := range []int{4, 5} {
+		for _, m := range p.sentReqs[idx].Messages {
+			if strings.Contains(m.Content, "plan reply") {
+				t.Errorf("request #%d: expected the planning turn's reply not to leak into the second task's history, got: %+v", idx+1, p.sentReqs[idx].Messages)
+			}
+			if strings.Contains(m.Content, "task1 reply") {
+				t.Errorf("request #%d: expected the first task's reply not to leak into the second task's history, got: %+v", idx+1, p.sentReqs[idx].Messages)
+			}
+		}
+	}
+	// The second task's own request should still be self-contained: a
+	// system message plus this task's own prompt (and, for the final
+	// round, its own tool call/result) - not zero, and not bloated with
+	// carried-over turns.
+	if got := len(p.sentReqs[5].Messages); got < 2 || got > 4 {
+		t.Errorf("expected the second task's final request to have 2-4 messages (system + its own turn), got %d: %+v", got, p.sentReqs[5].Messages)
 	}
 }
 

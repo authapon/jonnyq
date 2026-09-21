@@ -332,6 +332,11 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string)
 		}
 
 		w.Plainln(fmt.Sprintf("[autocoding] working on: %s", next.text))
+		// Start each task with a clean slate: no memory of the planning
+		// step or any earlier task. The model re-discovers whatever it
+		// needs (via read_file/run_command) instead of relying on
+		// conversation history that keeps growing across the whole run.
+		ag.ResetHistory()
 		if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall)); err != nil {
 			return fmt.Errorf("working on %q: %w", next.text, err)
 		}

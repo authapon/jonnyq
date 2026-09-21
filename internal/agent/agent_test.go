@@ -63,8 +63,7 @@ func newTestAgent(t *testing.T, responses [][]llm.ChatEvent) (*Agent, *echoTool,
 	reg.Register(et)
 
 	p := &sequenceProvider{responses: responses}
-	ctxFile := filepath.Join(dir, ".context")
-	a := New(p, "test-model", reg, false, 0, 0, w, nil, ctxFile)
+	a := New(p, "test-model", reg, false, 0, 0, w, nil)
 	return a, et, outFile
 }
 
@@ -123,14 +122,6 @@ func TestRunTurnExecutesToolCallThenFinalAnswer(t *testing.T) {
 	}
 	if !strings.Contains(log, "token_in=13") || !strings.Contains(log, "token_out=3") || !strings.Contains(log, "total_token=16") {
 		t.Errorf("expected aggregated usage across both provider calls, got: %s", log)
-	}
-
-	ctxData, err := os.ReadFile(a.ContextFile)
-	if err != nil {
-		t.Fatalf("expected .context file to be written: %v", err)
-	}
-	if !strings.Contains(string(ctxData), "please echo hi") {
-		t.Errorf(".context missing prompt: %s", ctxData)
 	}
 }
 
