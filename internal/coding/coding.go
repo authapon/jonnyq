@@ -9,6 +9,7 @@
 package coding
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -98,10 +99,15 @@ func writeStoredHash(path, hash string) error {
 }
 
 // retryState is the persisted "same task, N attempts in a row" counter used
-// by RunOneTask (/coding) across separate invocations.
+// by RunOneTask (/coding) across separate invocations. untouched records
+// whether the most recent attempt left .progress's raw content completely
+// unchanged (i.e. never called edit_file/write_file on it at all), as
+// opposed to having edited it but still left this task unchecked - these
+// are different failure modes and get different diagnostic notes.
 type retryState struct {
-	text  string
-	count int
+	text      string
+	count     int
+	untouched bool
 }
 
 func loadRetryState(path string) retryState {
@@ -109,19 +115,35 @@ func loadRetryState(path string) retryState {
 	if err != nil {
 		return retryState{}
 	}
-	parts := strings.SplitN(strings.TrimRight(string(data), "\n"), "\t", 2)
-	if len(parts) != 2 {
+	parts := strings.SplitN(strings.TrimRight(string(data), "\n"), "\t", 3)
+	if len(parts) != 3 {
 		return retryState{}
 	}
 	n, err := strconv.Atoi(parts[0])
 	if err != nil {
 		return retryState{}
 	}
-	return retryState{count: n, text: parts[1]}
+	return retryState{count: n, untouched: parts[1] == "1", text: parts[2]}
 }
 
 func writeRetryState(path string, s retryState) error {
-	return os.WriteFile(path, []byte(fmt.Sprintf("%d\t%s", s.count, s.text)), 0o644)
+	untouched := "0"
+	if s.untouched {
+		untouched = "1"
+	}
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\t%s\t%s", s.count, untouched, s.text)), 0o644)
+}
+
+// progressUnchanged reports whether .progress's raw content is identical
+// before and after an attempt, i.e. the model never called
+// edit_file/write_file on it at all (a read error counts as "changed" so a
+// missing/unreadable file never falsely reports "unchanged").
+func progressUnchanged(path string, before []byte) bool {
+	after, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(before, after)
 }
 
 func clearRetryState(path string) {
@@ -153,20 +175,35 @@ func buildReconcilePrompt() string {
 	)
 }
 
-func buildTaskPrompt(taskText string, stall int) string {
+func buildTaskPrompt(taskText string, stall int, prevUntouched bool) string {
 	var retryNote string
-	if stall > 0 {
-		// The same task came back unchecked after a previous attempt.
-		// Left as a plain "work on this task" prompt, models have been
-		// observed to just repeat "I already did this and verified it"
-		// from their own conversation history without noticing that
-		// .progress on disk still shows it unchecked - typically because
-		// an earlier edit_file call silently failed to match (its
-		// old_string didn't exactly match the current line) or a
-		// write_file rewrite of the whole file was based on a stale,
-		// pre-edit copy in the model's context. Point this out explicitly
-		// so the model investigates instead of repeating the same
-		// unverified claim.
+	switch {
+	case stall > 0 && prevUntouched:
+		// The model's previous attempt never called edit_file/write_file on
+		// .progress at all - it only ran shell commands and/or narrated the
+		// change in its reply text, which changes nothing by itself. This
+		// is a different failure mode from a failed edit (below), and
+		// pointing at "check your old_string match" would be misleading
+		// when no edit was even attempted, so call it out specifically.
+		retryNote = fmt.Sprintf(
+			"Note: this task was already attempted %d time(s) before. In your last attempt you did NOT call edit_file or "+
+				"write_file on %s at all - describing the change in your reply, or printing success messages via "+
+				"run_command (e.g. echo), does not change the file and does not count as finishing the task. This time, "+
+				"after you've genuinely verified it, you MUST make a real edit_file (preferred) or write_file tool call "+
+				"that changes this task's checkbox in %s from \"- [ ]\" to \"- [x]\".\n\n",
+			stall, progressFile, progressFile,
+		)
+	case stall > 0:
+		// The same task came back unchecked after a previous attempt that
+		// did touch .progress. Left as a plain "work on this task" prompt,
+		// models have been observed to just repeat "I already did this and
+		// verified it" without noticing that .progress on disk still shows
+		// it unchecked - typically because an earlier edit_file call
+		// silently failed to match (its old_string didn't exactly match the
+		// current line) or a write_file rewrite of the whole file was based
+		// on a stale, pre-edit copy in the model's context. Point this out
+		// explicitly so the model investigates instead of repeating the
+		// same unverified claim.
 		retryNote = fmt.Sprintf(
 			"Note: this task was already attempted %d time(s) before and is STILL shown as unchecked (\"- [ ]\") in %s right "+
 				"now. Do not assume you already finished it, even if it looks familiar - re-check from scratch: read_file %s "+
@@ -183,10 +220,11 @@ func buildTaskPrompt(taskText string, stall int) string {
 			"%s, always read_file it first to see its exact current content - never edit it from memory, since your view of it "+
 			"may be stale. Prefer edit_file for a single checkbox change over rewriting the whole file with write_file, which "+
 			"risks clobbering other tasks' state if your copy of it is out of date. Only once you have seen the build/test "+
-			"pass in this turn, mark this task done in %s by changing its checkbox from \"- [ ]\" to \"- [x]\". If the task has "+
-			"nothing to build or test (e.g. documentation only), say so explicitly instead of marking it done without "+
-			"verification. If you discover the task needs to be split into smaller steps, edit %s to reflect that instead of "+
-			"marking it done.",
+			"pass in this turn, actually call edit_file or write_file to change this task's checkbox in %s from \"- [ ]\" to "+
+			"\"- [x]\" - stating in your reply that it's done, without making that tool call, does not count and leaves the "+
+			"task unfinished. If the task has nothing to build or test (e.g. documentation only), say so explicitly instead "+
+			"of marking it done without verification. If you discover the task needs to be split into smaller steps, edit %s "+
+			"to reflect that instead of marking it done.",
 		retryNote, requirementsFile, taskText, progressFile, progressFile, progressFile,
 	)
 }
@@ -261,15 +299,18 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 	retryPath := filepath.Join(workDir, retryFile)
 	prev := loadRetryState(retryPath)
 	stall := 0
+	prevUntouched := false
 	if prev.text == next.text {
 		stall = prev.count
+		prevUntouched = prev.untouched
 	}
 
 	ag.CodingMode = true
 	defer func() { ag.CodingMode = false }()
 
 	w.Plainln(fmt.Sprintf("[coding] working on: %s", next.text))
-	if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall)); err != nil {
+	before, _ := os.ReadFile(progPath)
+	if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall, prevUntouched)); err != nil {
 		return fmt.Errorf("working on %q: %w", next.text, err)
 	}
 
@@ -283,7 +324,8 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 			clearRetryState(retryPath)
 			return fmt.Errorf("task %q made no progress after %d attempts via /coding; check %s and requirements.md manually", next.text, maxStallRounds, progressFile)
 		}
-		if err := writeRetryState(retryPath, retryState{text: next.text, count: newCount}); err != nil {
+		untouched := progressUnchanged(progPath, before)
+		if err := writeRetryState(retryPath, retryState{text: next.text, count: newCount, untouched: untouched}); err != nil {
 			return fmt.Errorf("recording retry state: %w", err)
 		}
 	} else {
@@ -307,6 +349,7 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string)
 
 	lastText := ""
 	stall := 0
+	untouched := false
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -329,6 +372,7 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string)
 		} else {
 			lastText = next.text
 			stall = 0
+			untouched = false
 		}
 
 		w.Plainln(fmt.Sprintf("[autocoding] working on: %s", next.text))
@@ -337,8 +381,10 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string)
 		// needs (via read_file/run_command) instead of relying on
 		// conversation history that keeps growing across the whole run.
 		ag.ResetHistory()
-		if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall)); err != nil {
+		before, _ := os.ReadFile(progPath)
+		if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall, untouched)); err != nil {
 			return fmt.Errorf("working on %q: %w", next.text, err)
 		}
+		untouched = progressUnchanged(progPath, before)
 	}
 }

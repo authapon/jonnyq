@@ -298,6 +298,13 @@ func TestRunOneTaskAllDone(t *testing.T) {
 // across separate RunOneTask calls, the "N attempts so far" state has to be
 // persisted to disk (.progress.retry) to still surface the diagnostic note
 // and eventually abort.
+// TestRunOneTaskPersistsRetryDiagnosticAcrossInvocations reproduces a
+// real-world failure across separate /coding invocations (no in-memory loop
+// to carry state, unlike /autocoding): the model claims the task is done in
+// prose every time without ever calling edit_file/write_file on .progress.
+// Since the file's raw content never changes across invocations, this must
+// persist and surface the "never touched the file" diagnostic, not the
+// generic "checkbox didn't end up set" one.
 func TestRunOneTaskPersistsRetryDiagnosticAcrossInvocations(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [ ] stuck task\n"), 0o644); err != nil {
@@ -335,8 +342,11 @@ func TestRunOneTaskPersistsRetryDiagnosticAcrossInvocations(t *testing.T) {
 		t.Errorf("did not expect the diagnostic note on the first invocation, got: %s", first)
 	}
 	last := lastUserContent(p.sentReqs[len(p.sentReqs)-1])
-	if !strings.Contains(last, "already attempted") || !strings.Contains(last, "STILL shown as unchecked") {
-		t.Errorf("expected the diagnostic note on a later invocation, got: %s", last)
+	if !strings.Contains(last, "already attempted") || !strings.Contains(last, "did NOT call edit_file or write_file") {
+		t.Errorf("expected the 'never touched the file' diagnostic note on a later invocation, got: %s", last)
+	}
+	if strings.Contains(last, "STILL shown as unchecked") {
+		t.Errorf("did not expect the generic 'failed edit' note when no edit was ever attempted, got: %s", last)
 	}
 
 	if _, err := os.Stat(filepath.Join(dir, retryFile)); !os.IsNotExist(err) {
@@ -405,7 +415,13 @@ func TestAutoRunGeneratesAndCompletesAllTasks(t *testing.T) {
 	}
 }
 
-func TestAutoRunRetriesStuckTaskWithDiagnosticNote(t *testing.T) {
+// TestAutoRunRetriesStuckTaskNeverTouchedWithDiagnosticNote reproduces a
+// real-world failure: the model claims the task is done in prose (and even
+// prints fake "✓ passing" lines via run_command echo) without ever calling
+// edit_file/write_file on .progress at all. Since .progress's raw content
+// never changes across attempts, this must hit the "untouched" branch of
+// the diagnostic note, not the generic "checkbox didn't end up set" one.
+func TestAutoRunRetriesStuckTaskNeverTouchedWithDiagnosticNote(t *testing.T) {
 	dir := t.TempDir()
 	reqData := []byte("x")
 	if err := os.WriteFile(filepath.Join(dir, requirementsFile), reqData, 0o644); err != nil {
@@ -439,12 +455,63 @@ func TestAutoRunRetriesStuckTaskWithDiagnosticNote(t *testing.T) {
 	}
 
 	last := lastUserContent(p.sentReqs[len(p.sentReqs)-1])
-	if !strings.Contains(last, "already attempted") || !strings.Contains(last, "STILL shown as unchecked") {
-		t.Errorf("expected the retry prompt to include the diagnostic note, got: %s", last)
+	if !strings.Contains(last, "already attempted") || !strings.Contains(last, "did NOT call edit_file or write_file") {
+		t.Errorf("expected the 'never touched the file' diagnostic note, got: %s", last)
+	}
+	if strings.Contains(last, "STILL shown as unchecked") {
+		t.Errorf("did not expect the generic 'failed edit' note when no edit was ever attempted, got: %s", last)
 	}
 	first := lastUserContent(p.sentReqs[0])
 	if strings.Contains(first, "already attempted") {
 		t.Errorf("did not expect the diagnostic note on the first attempt, got: %s", first)
+	}
+}
+
+// TestAutoRunRetriesStuckTaskTouchedWithDiagnosticNote covers the other
+// failure mode: the model DOES call write_file on .progress each attempt,
+// but the task stays unchecked (e.g. it keeps rewriting the same content
+// from a stale copy). This must hit the generic "checkbox didn't end up
+// set" branch, not the "never touched the file" one.
+func TestAutoRunRetriesStuckTaskTouchedWithDiagnosticNote(t *testing.T) {
+	dir := t.TempDir()
+	reqData := []byte("x")
+	if err := os.WriteFile(filepath.Join(dir, requirementsFile), reqData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [ ] stuck task\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStoredHash(filepath.Join(dir, hashFile), fileHash(reqData)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Each attempt writes genuinely different bytes (as a real stale-copy
+	// clobber would) so this is distinguishable, at the file-content level
+	// used by progressUnchanged, from an attempt that never touches the
+	// file at all - writing back identical content wouldn't be.
+	p := &sequenceProvider{t: t, steps: []step{
+		writeFileStep("- [ ] stuck task\n# attempt 1\n"), contentStep("done"),
+		writeFileStep("- [ ] stuck task\n# attempt 2\n"), contentStep("done"),
+		writeFileStep("- [ ] stuck task\n# attempt 3\n"), contentStep("done"),
+		writeFileStep("- [ ] stuck task\n# attempt 4\n"), contentStep("done"),
+		writeFileStep("- [ ] stuck task\n# attempt 5\n"), contentStep("done"),
+	}}
+	ag := newTestAgent(t, dir, p)
+
+	err := AutoRun(context.Background(), ag, ag.UI, dir)
+	if err == nil {
+		t.Fatal("expected an error once the stall limit is reached")
+	}
+	if !strings.Contains(err.Error(), "made no progress") {
+		t.Errorf("expected a stall error, got: %v", err)
+	}
+
+	last := lastUserContent(p.sentReqs[len(p.sentReqs)-1])
+	if !strings.Contains(last, "already attempted") || !strings.Contains(last, "STILL shown as unchecked") {
+		t.Errorf("expected the generic 'checkbox not set' diagnostic note, got: %s", last)
+	}
+	if strings.Contains(last, "did NOT call edit_file or write_file") {
+		t.Errorf("did not expect the 'never touched the file' note when write_file was called every attempt, got: %s", last)
 	}
 }
 
