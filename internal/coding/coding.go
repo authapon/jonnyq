@@ -40,6 +40,19 @@ const (
 	// many consecutive attempts, so a genuinely stuck task surfaces to the
 	// user instead of being retried forever unnoticed.
 	maxStallRounds = 5
+	// maxNoProgressRounds is AutoRun's broader, independent safety valve on
+	// top of maxStallRounds: it counts consecutive rounds where NOT ONE
+	// task anywhere in .progress newly went from unchecked to checked,
+	// regardless of whether the "next" unfinished task's text happens to
+	// differ round to round (e.g. the model rewords a task, reorders the
+	// list, or thrashes between several half-finished tasks). The
+	// same-task stall counter alone cannot catch that pattern, since it
+	// only tracks repeats of one exact task text - without this, a run
+	// where the "next" task's text keeps changing has no bound and can
+	// loop for hours. Larger than maxStallRounds since legitimately
+	// working through several small tasks before the first one lands is
+	// normal.
+	maxNoProgressRounds = 15
 )
 
 var checklistRe = regexp.MustCompile(`^- \[([ xX])\]\s*(.+)$`)
@@ -79,6 +92,16 @@ func firstUnfinished(tasks []task) (task, bool) {
 		}
 	}
 	return task{}, false
+}
+
+func countDone(tasks []task) int {
+	n := 0
+	for _, t := range tasks {
+		if t.done {
+			n++
+		}
+	}
+	return n
 }
 
 func fileHash(data []byte) string {
@@ -350,6 +373,8 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string)
 	lastText := ""
 	stall := 0
 	untouched := false
+	lastDoneCount := -1
+	noProgressRounds := 0
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -362,6 +387,25 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string)
 		if !ok {
 			w.Plainln("[autocoding] all tasks in " + progressFile + " are checked off")
 			return nil
+		}
+
+		// Independent of the same-task check below: if the total number of
+		// completed tasks hasn't grown in a while, nothing is actually
+		// getting finished, no matter how "next" is drifting round to
+		// round. This bounds the run even in cases the same-task counter
+		// can't see.
+		doneNow := countDone(tasks)
+		if lastDoneCount == -1 {
+			lastDoneCount = doneNow
+		}
+		if doneNow > lastDoneCount {
+			lastDoneCount = doneNow
+			noProgressRounds = 0
+		} else {
+			noProgressRounds++
+			if noProgressRounds >= maxNoProgressRounds {
+				return fmt.Errorf("no task in %s has been completed in the last %d rounds (currently on %q); aborting - check %s and requirements.md manually", progressFile, maxNoProgressRounds, next.text, progressFile)
+			}
 		}
 
 		if next.text == lastText {

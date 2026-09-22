@@ -563,6 +563,56 @@ func TestAutoRunResetsHistoryBeforeEachTask(t *testing.T) {
 	}
 }
 
+// TestAutoRunAbortsOnNoOverallProgressEvenIfNextTaskTextKeepsChanging
+// reproduces a real-world runaway: the model keeps rewriting .progress
+// (e.g. reordering it) each attempt, so the "next" unfinished task's text
+// alternates between two different tasks every round - defeating the
+// same-task stall counter, which only tracks whether one exact task text
+// repeats - while zero tasks ever actually get checked off. Without a
+// broader safety valve this can run for hours; with it, AutoRun must abort
+// within maxNoProgressRounds instead of exhausting every scripted response
+// (which would itself surface as a different, misleading error).
+func TestAutoRunAbortsOnNoOverallProgressEvenIfNextTaskTextKeepsChanging(t *testing.T) {
+	dir := t.TempDir()
+	reqData := []byte("x")
+	if err := os.WriteFile(filepath.Join(dir, requirementsFile), reqData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [ ] task A\n- [ ] task B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStoredHash(filepath.Join(dir, hashFile), fileHash(reqData)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Provide comfortably more scripted rounds than maxNoProgressRounds
+	// should ever consume, so a fix that doesn't abort in time causes a
+	// mismatched error (running out of scripted steps) rather than
+	// silently looping forever in the test.
+	var steps []step
+	for i := 0; i < maxNoProgressRounds+5; i++ {
+		if i%2 == 0 {
+			steps = append(steps, writeFileStep("- [ ] task B\n- [ ] task A\n"), contentStep("reordered"))
+		} else {
+			steps = append(steps, writeFileStep("- [ ] task A\n- [ ] task B\n"), contentStep("reordered"))
+		}
+	}
+	p := &sequenceProvider{t: t, steps: steps}
+	ag := newTestAgent(t, dir, p)
+
+	err := AutoRun(context.Background(), ag, ag.UI, dir)
+	if err == nil {
+		t.Fatal("expected an error once the no-overall-progress limit is reached")
+	}
+	if !strings.Contains(err.Error(), "no task") || !strings.Contains(err.Error(), "completed") {
+		t.Errorf("expected the no-overall-progress error, got: %v", err)
+	}
+	// 2 Chat calls (tool round + final round) per AutoRun iteration.
+	if maxRounds := 2 * (maxNoProgressRounds + 1); p.calls > maxRounds {
+		t.Errorf("expected AutoRun to abort within %d rounds instead of looping past the safety valve, got %d Chat calls", maxNoProgressRounds, p.calls/2)
+	}
+}
+
 func TestAutoRunResetsCodingMode(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, requirementsFile), []byte("x"), 0o644); err != nil {
