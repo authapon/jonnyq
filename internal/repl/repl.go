@@ -16,6 +16,7 @@ import (
 	"jonnyq/internal/coding"
 	"jonnyq/internal/config"
 	"jonnyq/internal/llm"
+	"jonnyq/internal/notify"
 	"jonnyq/internal/tools"
 	"jonnyq/internal/ui"
 	"jonnyq/internal/watch"
@@ -35,6 +36,7 @@ const helpText = `Slash commands:
   /coding                           work on the next unfinished task in .progress, then stop (Ctrl-C cancels)
   /autocoding                       plan if needed, then work through every task in .progress in one run (Ctrl-C cancels)
   /watchfile [<word>|off]           watch the working directory for a magic word (default "AI!") and act on it when found
+  /ntfy [<topic url>|off]           set/clear the ntfy.sh topic URL for /plan and /coding completion notifications
   /exit  /bye                       exit jonnyq
 
 Multi-line prompts: end a line with a trailing backslash to continue it on
@@ -302,14 +304,14 @@ func (r *REPL) handleSlash(ctx context.Context, line string, watchTriggers chan<
 			r.UI.Plainln("no model set; use /model <name> first")
 			return false, nil
 		}
-		return false, coding.Plan(ctx, r.Agent, r.UI, ".")
+		return false, coding.Plan(ctx, r.Agent, r.UI, ".", notify.New(r.Cfg.NtfyURL))
 
 	case "/coding":
 		if r.Cfg.Model == "" {
 			r.UI.Plainln("no model set; use /model <name> first")
 			return false, nil
 		}
-		return false, coding.RunOneTask(ctx, r.Agent, r.UI, ".")
+		return false, coding.RunOneTask(ctx, r.Agent, r.UI, ".", notify.New(r.Cfg.NtfyURL))
 
 	case "/autocoding":
 		if r.Cfg.Model == "" {
@@ -320,6 +322,9 @@ func (r *REPL) handleSlash(ctx context.Context, line string, watchTriggers chan<
 
 	case "/watchfile":
 		r.toggleWatch(rest, watchTriggers)
+
+	case "/ntfy":
+		r.toggleNtfy(rest)
 
 	default:
 		r.UI.Plainln("unknown command " + cmd + "; try /help")
@@ -367,6 +372,34 @@ func (r *REPL) toggleWatch(arg string, watchTriggers chan<- watch.Trigger) {
 	r.watcher = watch.New(".", r.Cfg.WatchMagicWord, interval, r.Cfg.OutputFile)
 	r.watcher.Start(watchTriggers)
 	r.UI.Plainln(fmt.Sprintf("[watchfile] watching the working directory for %q", r.Cfg.WatchMagicWord))
+}
+
+// toggleNtfy implements /ntfy: bare shows the current setting, "off" clears
+// it, and a URL argument sets it. Notifications are sent by /plan and
+// /coding (not /autocoding) via a fresh notify.Notifier built from
+// Cfg.NtfyURL each time they run, so a change here takes effect on the very
+// next invocation with no separate state to keep in sync.
+func (r *REPL) toggleNtfy(arg string) {
+	arg = strings.TrimSpace(arg)
+	lower := strings.ToLower(arg)
+
+	if lower == "off" {
+		r.Cfg.NtfyURL = ""
+		r.UI.Plainln("[ntfy] notifications disabled")
+		return
+	}
+
+	if arg == "" {
+		if r.Cfg.NtfyURL == "" {
+			r.UI.Plainln("[ntfy] not configured; usage: /ntfy <topic url>|off")
+		} else {
+			r.UI.Plainln("[ntfy] notifications enabled: " + r.Cfg.NtfyURL)
+		}
+		return
+	}
+
+	r.Cfg.NtfyURL = arg
+	r.UI.Plainln("[ntfy] notifications enabled: " + arg)
 }
 
 func (r *REPL) rebuildProvider() error {

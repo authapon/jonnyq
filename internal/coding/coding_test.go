@@ -3,6 +3,9 @@ package coding
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,9 +13,49 @@ import (
 
 	"jonnyq/internal/agent"
 	"jonnyq/internal/llm"
+	"jonnyq/internal/notify"
 	"jonnyq/internal/tools"
 	"jonnyq/internal/ui"
 )
+
+// captureNotify starts an httptest.Server that records the last ntfy
+// request's Title header and body, for asserting what Plan/RunOneTask
+// notified about.
+type captureNotify struct {
+	srv   *httptest.Server
+	title string
+	body  string
+	calls int
+}
+
+func newCaptureNotify(t *testing.T) *captureNotify {
+	t.Helper()
+	c := &captureNotify{}
+	c.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c.calls++
+		c.title = r.Header.Get("Title")
+		body, _ := io.ReadAll(r.Body)
+		c.body = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(c.srv.Close)
+	return c
+}
+
+func (c *captureNotify) notifier() *notify.Notifier {
+	return notify.New(c.srv.URL)
+}
+
+// failIfCalledNotify starts an httptest.Server that fails the test if it
+// ever receives a request, for asserting a code path does NOT notify.
+func failIfCalledNotify(t *testing.T) *notify.Notifier {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected ntfy notification received")
+	}))
+	t.Cleanup(srv.Close)
+	return notify.New(srv.URL)
+}
 
 // lastUserContent returns the content of the last user-role message in a
 // sent ChatRequest, i.e. the actual prompt text that was composed for that
@@ -107,7 +150,7 @@ func TestPlanGeneratesProgressWhenMissing(t *testing.T) {
 	}}
 	ag := newTestAgent(t, dir, p)
 
-	if err := Plan(context.Background(), ag, ag.UI, dir); err != nil {
+	if err := Plan(context.Background(), ag, ag.UI, dir, nil); err != nil {
 		t.Fatalf("Plan failed: %v", err)
 	}
 	if p.calls != 2 {
@@ -153,7 +196,7 @@ func TestPlanSkipsWhenRequirementsUnchanged(t *testing.T) {
 	p := &sequenceProvider{t: t} // no steps scripted: any Chat call fails the test
 	ag := newTestAgent(t, dir, p)
 
-	if err := Plan(context.Background(), ag, ag.UI, dir); err != nil {
+	if err := Plan(context.Background(), ag, ag.UI, dir, nil); err != nil {
 		t.Fatalf("Plan failed: %v", err)
 	}
 	if p.calls != 0 {
@@ -184,7 +227,7 @@ func TestPlanReconcilesWhenRequirementsChanged(t *testing.T) {
 	}}
 	ag := newTestAgent(t, dir, p)
 
-	if err := Plan(context.Background(), ag, ag.UI, dir); err != nil {
+	if err := Plan(context.Background(), ag, ag.UI, dir, nil); err != nil {
 		t.Fatalf("Plan failed: %v", err)
 	}
 	if p.calls != 2 {
@@ -214,7 +257,7 @@ func TestPlanReconcilesWhenRequirementsChanged(t *testing.T) {
 func TestPlanErrorsWithoutRequirementsFile(t *testing.T) {
 	dir := t.TempDir()
 	ag := newTestAgent(t, dir, &sequenceProvider{t: t})
-	if err := Plan(context.Background(), ag, ag.UI, dir); err == nil {
+	if err := Plan(context.Background(), ag, ag.UI, dir, nil); err == nil {
 		t.Error("expected an error when requirements.md is missing")
 	}
 }
@@ -227,11 +270,87 @@ func TestPlanResetsCodingMode(t *testing.T) {
 	p := &sequenceProvider{t: t, steps: []step{writeFileStep("- [ ] only task\n"), contentStep("ok")}}
 	ag := newTestAgent(t, dir, p)
 
-	if err := Plan(context.Background(), ag, ag.UI, dir); err != nil {
+	if err := Plan(context.Background(), ag, ag.UI, dir, nil); err != nil {
 		t.Fatalf("Plan failed: %v", err)
 	}
 	if ag.CodingMode {
 		t.Error("expected CodingMode to be reset to false after Plan returns")
+	}
+}
+
+func TestPlanNotifiesOnGenerate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, requirementsFile), []byte("build a thing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &sequenceProvider{t: t, steps: []step{writeFileStep("- [ ] task one\n- [x] task two\n"), contentStep("ok")}}
+	ag := newTestAgent(t, dir, p)
+	capture := newCaptureNotify(t)
+
+	if err := Plan(context.Background(), ag, ag.UI, dir, capture.notifier()); err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	if capture.calls != 1 {
+		t.Fatalf("expected exactly 1 notification, got %d", capture.calls)
+	}
+	if !strings.Contains(capture.title, "/plan") {
+		t.Errorf("expected the notification title to mention /plan, got: %q", capture.title)
+	}
+	if !strings.Contains(capture.body, "1/2 tasks done") {
+		t.Errorf("expected the notification body to summarize progress, got: %q", capture.body)
+	}
+}
+
+func TestPlanNotifiesOnReconcile(t *testing.T) {
+	dir := t.TempDir()
+	oldReq := []byte("build a thing")
+	if err := os.WriteFile(filepath.Join(dir, requirementsFile), oldReq, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [x] old task\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStoredHash(filepath.Join(dir, hashFile), fileHash(oldReq)); err != nil {
+		t.Fatal(err)
+	}
+	newReq := []byte("build a thing, and also a new feature")
+	if err := os.WriteFile(filepath.Join(dir, requirementsFile), newReq, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &sequenceProvider{t: t, steps: []step{
+		writeFileStep("- [x] old task\n- [ ] new task\n"), contentStep("ok"),
+	}}
+	ag := newTestAgent(t, dir, p)
+	capture := newCaptureNotify(t)
+
+	if err := Plan(context.Background(), ag, ag.UI, dir, capture.notifier()); err != nil {
+		t.Fatalf("Plan failed: %v", err)
+	}
+	if capture.calls != 1 {
+		t.Fatalf("expected exactly 1 notification, got %d", capture.calls)
+	}
+	if !strings.Contains(capture.body, "2 tasks total (was 1)") {
+		t.Errorf("expected the notification body to mention the task-count change, got: %q", capture.body)
+	}
+}
+
+func TestPlanDoesNotNotifyWhenAlreadyUpToDate(t *testing.T) {
+	dir := t.TempDir()
+	reqData := []byte("build a thing")
+	if err := os.WriteFile(filepath.Join(dir, requirementsFile), reqData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [x] task one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStoredHash(filepath.Join(dir, hashFile), fileHash(reqData)); err != nil {
+		t.Fatal(err)
+	}
+	ag := newTestAgent(t, dir, &sequenceProvider{t: t})
+
+	if err := Plan(context.Background(), ag, ag.UI, dir, failIfCalledNotify(t)); err != nil {
+		t.Fatalf("Plan failed: %v", err)
 	}
 }
 
@@ -248,7 +367,7 @@ func TestRunOneTaskDoesExactlyOneTaskThenStops(t *testing.T) {
 	}}
 	ag := newTestAgent(t, dir, p)
 
-	if err := RunOneTask(context.Background(), ag, ag.UI, dir); err != nil {
+	if err := RunOneTask(context.Background(), ag, ag.UI, dir, nil); err != nil {
 		t.Fatalf("RunOneTask failed: %v", err)
 	}
 	if p.calls != 2 {
@@ -267,7 +386,7 @@ func TestRunOneTaskDoesExactlyOneTaskThenStops(t *testing.T) {
 func TestRunOneTaskErrorsWithoutProgressFile(t *testing.T) {
 	dir := t.TempDir()
 	ag := newTestAgent(t, dir, &sequenceProvider{t: t})
-	err := RunOneTask(context.Background(), ag, ag.UI, dir)
+	err := RunOneTask(context.Background(), ag, ag.UI, dir, nil)
 	if err == nil {
 		t.Fatal("expected an error when .progress is missing")
 	}
@@ -284,7 +403,7 @@ func TestRunOneTaskAllDone(t *testing.T) {
 	p := &sequenceProvider{t: t}
 	ag := newTestAgent(t, dir, p)
 
-	if err := RunOneTask(context.Background(), ag, ag.UI, dir); err != nil {
+	if err := RunOneTask(context.Background(), ag, ag.UI, dir, nil); err != nil {
 		t.Fatalf("RunOneTask failed: %v", err)
 	}
 	if p.calls != 0 {
@@ -322,7 +441,7 @@ func TestRunOneTaskPersistsRetryDiagnosticAcrossInvocations(t *testing.T) {
 
 	var err error
 	for i := 0; i < maxStallRounds; i++ {
-		err = RunOneTask(context.Background(), ag, ag.UI, dir)
+		err = RunOneTask(context.Background(), ag, ag.UI, dir, nil)
 		if i < maxStallRounds-1 && err != nil {
 			t.Fatalf("invocation %d: unexpected error: %v", i+1, err)
 		}
@@ -369,7 +488,7 @@ func TestRunOneTaskClearsRetryStateWhenTaskCompletes(t *testing.T) {
 	}}
 	ag := newTestAgent(t, dir, p)
 
-	if err := RunOneTask(context.Background(), ag, ag.UI, dir); err != nil {
+	if err := RunOneTask(context.Background(), ag, ag.UI, dir, nil); err != nil {
 		t.Fatalf("RunOneTask failed: %v", err)
 	}
 
@@ -382,6 +501,77 @@ func TestRunOneTaskClearsRetryStateWhenTaskCompletes(t *testing.T) {
 	// future, unrelated task doesn't inherit it.
 	if _, err := os.Stat(filepath.Join(dir, retryFile)); !os.IsNotExist(err) {
 		t.Error("expected retry state to be cleared once the task is done")
+	}
+}
+
+func TestRunOneTaskNotifiesOnCompletion(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [ ] task one\n- [ ] task two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &sequenceProvider{t: t, steps: []step{
+		writeFileStep("- [x] task one\n- [ ] task two\n"), contentStep("done"),
+	}}
+	ag := newTestAgent(t, dir, p)
+	capture := newCaptureNotify(t)
+
+	if err := RunOneTask(context.Background(), ag, ag.UI, dir, capture.notifier()); err != nil {
+		t.Fatalf("RunOneTask failed: %v", err)
+	}
+	if capture.calls != 1 {
+		t.Fatalf("expected exactly 1 notification, got %d", capture.calls)
+	}
+	if !strings.Contains(capture.title, "/coding") {
+		t.Errorf("expected the notification title to mention /coding, got: %q", capture.title)
+	}
+	if !strings.Contains(capture.body, "task one") || !strings.Contains(capture.body, "1/2 tasks done") {
+		t.Errorf("expected the notification body to name the completed task and overall progress, got: %q", capture.body)
+	}
+}
+
+func TestRunOneTaskNotifiesWhenAllDone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [x] task one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := newTestAgent(t, dir, &sequenceProvider{t: t})
+	capture := newCaptureNotify(t)
+
+	if err := RunOneTask(context.Background(), ag, ag.UI, dir, capture.notifier()); err != nil {
+		t.Fatalf("RunOneTask failed: %v", err)
+	}
+	if capture.calls != 1 {
+		t.Fatalf("expected exactly 1 notification, got %d", capture.calls)
+	}
+	if !strings.Contains(capture.body, "1/1 tasks done") {
+		t.Errorf("expected the notification body to report full completion, got: %q", capture.body)
+	}
+}
+
+func TestRunOneTaskNotifiesOnStall(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [ ] stuck task\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRetryState(filepath.Join(dir, retryFile), retryState{text: "stuck task", count: maxStallRounds - 1}); err != nil {
+		t.Fatal(err)
+	}
+	p := &sequenceProvider{t: t, steps: []step{contentStep("I already did this.")}}
+	ag := newTestAgent(t, dir, p)
+	capture := newCaptureNotify(t)
+
+	err := RunOneTask(context.Background(), ag, ag.UI, dir, capture.notifier())
+	if err == nil {
+		t.Fatal("expected an error once the stall limit is reached")
+	}
+	if capture.calls != 1 {
+		t.Fatalf("expected exactly 1 notification, got %d", capture.calls)
+	}
+	if !strings.Contains(capture.title, "stalled") {
+		t.Errorf("expected the notification title to flag a stall, got: %q", capture.title)
+	}
+	if !strings.Contains(capture.body, "stuck task") {
+		t.Errorf("expected the notification body to name the stuck task, got: %q", capture.body)
 	}
 }
 

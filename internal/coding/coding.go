@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"jonnyq/internal/agent"
+	"jonnyq/internal/notify"
 	"jonnyq/internal/ui"
 )
 
@@ -102,6 +103,23 @@ func countDone(tasks []task) int {
 		}
 	}
 	return n
+}
+
+func progressSummaryLine(tasks []task) string {
+	return fmt.Sprintf("%d/%d tasks done", countDone(tasks), len(tasks))
+}
+
+// notifyOrWarn sends a completion notification via n, printing a non-fatal
+// warning through w if it fails - a broken notification endpoint must
+// never fail the underlying /plan or /coding command. A no-op (no
+// warning) when n is disabled.
+func notifyOrWarn(ctx context.Context, n *notify.Notifier, w *ui.Writer, title, message string) {
+	if !n.Enabled() {
+		return
+	}
+	if err := n.Send(ctx, title, message); err != nil {
+		w.Plainln("warning: ntfy notification failed: " + err.Error())
+	}
 }
 
 func fileHash(data []byte) string {
@@ -257,8 +275,11 @@ func buildTaskPrompt(taskText string, stall int, prevUntouched bool) string {
 // generated/reconciled (checked against a stored content hash), checking
 // consistency with the existing codebase either way. It never implements
 // anything. If .progress already exists and requirements.md hasn't changed,
-// it does nothing and reports that the plan is already up to date.
-func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) error {
+// it does nothing and reports that the plan is already up to date. n is the
+// ntfy notifier to post a completion summary to when real work happened
+// (generating or reconciling) - pass nil/a disabled Notifier to skip
+// notifying, as AutoRun does for its own internal Plan call.
+func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) error {
 	reqPath := filepath.Join(workDir, requirementsFile)
 	reqData, err := os.ReadFile(reqPath)
 	if err != nil {
@@ -276,12 +297,16 @@ func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) er
 		if err := ag.RunTurn(ctx, buildGeneratePrompt()); err != nil {
 			return fmt.Errorf("generating %s: %w", progressFile, err)
 		}
-		if _, err := os.Stat(progPath); err != nil {
+		tasks, err := parseProgress(progPath)
+		if err != nil {
 			return fmt.Errorf("model did not create %s", progressFile)
 		}
 		if err := writeStoredHash(hashPath, currentHash); err != nil {
 			return fmt.Errorf("recording requirements hash: %w", err)
 		}
+		notifyOrWarn(ctx, n, w, "jonnyq: /plan complete", fmt.Sprintf(
+			"Generated %s from %s: %s", progressFile, requirementsFile, progressSummaryLine(tasks),
+		))
 		return nil
 	}
 
@@ -290,6 +315,7 @@ func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) er
 		return nil
 	}
 
+	tasksBefore, _ := parseProgress(progPath)
 	w.Plainln("[plan] " + requirementsFile + " changed since " + progressFile + " was last updated; reconciling")
 	if err := ag.RunTurn(ctx, buildReconcilePrompt()); err != nil {
 		return fmt.Errorf("reconciling %s: %w", progressFile, err)
@@ -297,13 +323,21 @@ func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) er
 	if err := writeStoredHash(hashPath, currentHash); err != nil {
 		return fmt.Errorf("recording requirements hash: %w", err)
 	}
+	tasksAfter, _ := parseProgress(progPath)
+	notifyOrWarn(ctx, n, w, "jonnyq: /plan complete", fmt.Sprintf(
+		"Reconciled %s against %s: %d tasks total (was %d), %s",
+		progressFile, requirementsFile, len(tasksAfter), len(tasksBefore), progressSummaryLine(tasksAfter),
+	))
 	return nil
 }
 
 // RunOneTask is /coding: it works on exactly one unfinished task from
 // .progress and then returns, without looping through the rest. .progress
 // must already exist (via /plan or /autocoding) - it is not generated here.
-func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) error {
+// n is the ntfy notifier to post a completion summary to (all tasks
+// already done, this task completed, or this task stalled out) - pass
+// nil/a disabled Notifier to skip notifying.
+func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) error {
 	progPath := filepath.Join(workDir, progressFile)
 	if _, err := os.Stat(progPath); err != nil {
 		return fmt.Errorf("%s not found; run /plan first to generate it from %s", progressFile, requirementsFile)
@@ -316,6 +350,7 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 	next, ok := firstUnfinished(tasks)
 	if !ok {
 		w.Plainln("[coding] all tasks in " + progressFile + " are checked off")
+		notifyOrWarn(ctx, n, w, "jonnyq: /coding complete", fmt.Sprintf("All tasks already complete: %s", progressSummaryLine(tasks)))
 		return nil
 	}
 
@@ -345,23 +380,30 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 		newCount := stall + 1
 		if newCount >= maxStallRounds {
 			clearRetryState(retryPath)
+			notifyOrWarn(ctx, n, w, "jonnyq: /coding stalled", fmt.Sprintf(
+				"Task %q made no progress after %d attempts; check %s and requirements.md manually. %s",
+				next.text, maxStallRounds, progressFile, progressSummaryLine(tasksAfter),
+			))
 			return fmt.Errorf("task %q made no progress after %d attempts via /coding; check %s and requirements.md manually", next.text, maxStallRounds, progressFile)
 		}
 		untouched := progressUnchanged(progPath, before)
 		if err := writeRetryState(retryPath, retryState{text: next.text, count: newCount, untouched: untouched}); err != nil {
 			return fmt.Errorf("recording retry state: %w", err)
 		}
-	} else {
-		clearRetryState(retryPath)
+		return nil
 	}
+	clearRetryState(retryPath)
+	notifyOrWarn(ctx, n, w, "jonnyq: /coding complete", fmt.Sprintf("Completed: %q\n%s", next.text, progressSummaryLine(tasksAfter)))
 	return nil
 }
 
 // AutoRun is /autocoding: the original /coding behavior, kept under a new
 // name. It plans (as Plan does) if needed, then works through every
 // unfinished task in .progress in one run instead of stopping after each.
+// It never sends ntfy notifications itself (only /plan and /coding do) -
+// its internal Plan call passes a disabled notifier accordingly.
 func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) error {
-	if err := Plan(ctx, ag, w, workDir); err != nil {
+	if err := Plan(ctx, ag, w, workDir, nil); err != nil {
 		return err
 	}
 

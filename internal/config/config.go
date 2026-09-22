@@ -28,6 +28,7 @@ const (
 	DefaultMaxToolCallsPerTurn  = 50
 	DefaultWatchMagicWord       = "AI!"
 	DefaultWatchPollIntervalSec = 1
+	DefaultNtfyURL              = ""
 )
 
 // Config holds all runtime settings for jonnyq.
@@ -55,6 +56,11 @@ type Config struct {
 
 	WatchMagicWord       string
 	WatchPollIntervalSec int
+
+	// NtfyURL is the ntfy.sh (or self-hosted) topic URL /plan and /coding
+	// post a completion summary to, e.g. "https://ntfy.sh/my-topic".
+	// Empty disables notifications.
+	NtfyURL string
 
 	SkillPaths []string
 
@@ -127,6 +133,7 @@ func Load(args []string) (*Config, error) {
 	maxToolCallsPerTurn := fs.Int("max-tool-calls-per-turn", envInt("MAX_TOOL_CALLS_PER_TURN", DefaultMaxToolCallsPerTurn), "max tool calls allowed within a single turn")
 	watchMagicWord := fs.String("watch-magic-word", envString("WATCH_MAGIC_WORD", DefaultWatchMagicWord), "magic word /watchfile scans for in changed files")
 	watchPollIntervalSec := fs.Int("watch-poll-interval-sec", envInt("WATCH_POLL_INTERVAL_SEC", DefaultWatchPollIntervalSec), "/watchfile polling interval in seconds")
+	ntfyURL := fs.String("ntfy-url", envString("NTFY_URL", DefaultNtfyURL), "ntfy.sh (or self-hosted) topic URL for /plan and /coding completion notifications, e.g. https://ntfy.sh/my-topic")
 	skillPath := fs.String("skill-path", skillPathStr, "semicolon-separated skill directories")
 	thinking := fs.Bool("thinking", envBool("THINKING", DefaultThinking), "enable model thinking")
 
@@ -153,6 +160,7 @@ func Load(args []string) (*Config, error) {
 	c.MaxToolCallsPerTurn = *maxToolCallsPerTurn
 	c.WatchMagicWord = *watchMagicWord
 	c.WatchPollIntervalSec = *watchPollIntervalSec
+	c.NtfyURL = *ntfyURL
 	c.Thinking = *thinking
 	if *skillPath != "" {
 		for _, p := range strings.Split(*skillPath, ";") {

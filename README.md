@@ -20,6 +20,7 @@ Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, �
 - ถ้าเจอ task เดิมค้างซ้ำ (ยัง `- [ ]` อยู่ใน `.progress` ทั้งที่ทำมาแล้วรอบหนึ่ง) ตั้งแต่รอบที่ 2 เป็นต้นไป prompt จะแนบข้อความเตือนที่ต่างกัน 2 แบบตามสิ่งที่ตรวจพบจริงจากไฟล์ (เทียบเนื้อหา `.progress` ก่อน/หลังรอบก่อนหน้า): (1) ถ้ารอบก่อนหน้า model **ไม่เรียก `edit_file`/`write_file` แตะไฟล์เลย** (เช่น แค่พิมพ์ยืนยันความสำเร็จในคำตอบ หรือ echo ข้อความ "✓ passed" ปลอม ๆ ผ่าน `run_command` โดยไม่ได้รันการ verify จริง) จะเตือนตรง ๆ ว่าการบรรยายว่าทำเสร็จไม่ได้แก้ไฟล์จริง ต้องเรียก tool จริงเท่านั้น หรือ (2) ถ้าแตะไฟล์แล้วแต่ task ยังไม่ถูกติ๊ก (เช่น `edit_file` ไม่ match exact text หรือ `write_file` เขียนทับทั้งไฟล์จาก context เก่า) จะให้ไป `read_file` เช็คของจริงก่อนแก้ต่อ — ทั้งสองกรณี `base prompt` (ไม่ใช่แค่ตอน retry) ก็เน้นย้ำอยู่แล้วว่าการติ๊ก checkbox ต้องเกิดจากการเรียก `edit_file`/`write_file` จริง การบอกในคำตอบเฉย ๆ ไม่นับ — `/coding` เก็บตัวนับและสถานะนี้ไว้ในไฟล์ `.progress.retry` เพราะแต่ละครั้งที่เรียกเป็นคนละ process/turn กัน ไม่มี loop ในหน่วยความจำให้จำต่อกันแบบ `/autocoding`
 - **Safety valve อีกชั้นสำหรับ `/autocoding`**: ตัวนับด้านบนดักได้เฉพาะกรณี "task เดิมค้างด้วยข้อความเดียวกันซ้ำ ๆ" เท่านั้น ถ้า model แก้ `.progress` ไปเรื่อย ๆ แบบไม่มีความหมาย (เช่น สลับลำดับ task ไปมา ทำให้ task ที่ถูกหยิบมาทำงานตัวถัดไป (`next`) มีข้อความเปลี่ยนไปทุกรอบ) โดยไม่มี task ไหนถูกติ๊กสำเร็จจริงเลย ตัวนับแบบข้อความเดิมจะไม่มีทางถูก trigger เพราะข้อความไม่เคยซ้ำกัน 2 รอบติด — จึงเพิ่มตัวนับอิสระอีกตัวที่ดูจาก **จำนวน task ที่ติ๊กสำเร็จโดยรวมทั้งไฟล์** แทน ถ้าผ่านไป 15 รอบติดต่อกันแล้วไม่มี task ไหนถูกติ๊กเพิ่มขึ้นเลย (ไม่ว่า `next` จะเปลี่ยนข้อความกี่ครั้งก็ตาม) จะหยุดทำงานทันทีพร้อม error บอกให้ผู้ใช้ไปตรวจสอบ `.progress`/`requirements.md` เอง แทนที่จะวนต่อไปได้เรื่อย ๆ ไม่มีที่สิ้นสุด
 - **Pair programming ผ่าน `/watchfile`**: `/watchfile [<magic word>|off]` (default magic word `AI!`, ตั้งค่าเริ่มต้นได้ผ่าน `-watch-magic-word`/`JONNYQ_WATCH_MAGIC_WORD`) เปิดการ poll working directory เป็นระยะ (`-watch-poll-interval-sec`/`JONNYQ_WATCH_POLL_INTERVAL_SEC`, default 1 วินาที, stdlib-only ไม่ใช้ fsnotify) เมื่อไฟล์ถูกแก้ไขแล้วมีบรรทัดที่มี magic word (เช่น `// AI! เพิ่ม error handling ตรงนี้`) จะส่งบรรทัดนั้นเป็น prompt ให้ agent ไปอ่านโค้ดรอบ ๆ แล้วดำเนินการตามคำสั่ง โดยจะข้าม dotfile/dot-directory ทั้งหมด (`.git`, `.progress*` ฯลฯ) รวมถึง `node_modules`/`vendor` และ**ไฟล์ log ของตัวเอง (`-output`)** เสมอ เพื่อไม่ให้ transcript ที่สะท้อน trigger กลับเข้ามาใน working directory ย้อนมา trigger ตัวเองซ้ำไม่รู้จบ — บรรทัดที่เคย trigger แล้วจะไม่ trigger ซ้ำจนกว่าเนื้อหาบรรทัดนั้นจะเปลี่ยน แก้ magic word ระหว่างที่กำลัง watch อยู่ได้ทันทีโดยไม่ต้อง restart การ watch
+- **แจ้งเตือนผ่าน [ntfy.sh](https://ntfy.sh)** (หรือ self-hosted ntfy server ก็ได้): ตั้งค่า topic URL เต็ม ๆ ได้ผ่าน `-ntfy-url`/`JONNYQ_NTFY_URL`/`/ntfy [<topic url>|off]` (เช่น `https://ntfy.sh/my-topic`) เมื่อตั้งไว้แล้ว `/plan` และ `/coding` จะยิง push notification ไปที่ topic นั้นทุกครั้งที่ทำงานจบ (ทั้งสำเร็จและตอน error/stall) พร้อมสรุปผลลัพธ์จริงที่คำนวณจาก `.progress` โดยตรง (ไม่ได้เรียก model มาสรุปเพิ่ม เพื่อความเร็วและไม่เสี่ยง hallucinate) เช่น "Generated .progress from requirements.md: 5/12 tasks done", "Completed: \"add error handling\"\n6/12 tasks done", หรือ "Task ... made no progress after 5 attempts ..." ตอน stall — `/autocoding` **ไม่แจ้งเตือนเอง** (ตามที่ตั้งใจไว้ เพราะมันเรียก `/plan` ภายในให้อัตโนมัติ ถ้าแจ้งด้วยจะรัวข้อความทุก task) หากส่ง notification ไม่สำเร็จ (เช่น network error) จะขึ้น warning เฉย ๆ ไม่ทำให้ `/plan`/`/coding` ล้มเหลวไปด้วย
 
 ## ความปลอดภัย (โดยตั้งใจ)
 
@@ -110,6 +111,7 @@ go test ./...
 | `-thinking` | `JONNYQ_THINKING` | `true` | เปิด/ปิด model thinking |
 | `-watch-magic-word` | `JONNYQ_WATCH_MAGIC_WORD` | `AI!` | magic word ที่ `/watchfile` (ไม่ใส่ argument) ใช้ scan หา |
 | `-watch-poll-interval-sec` | `JONNYQ_WATCH_POLL_INTERVAL_SEC` | `1` | ความถี่ในการ poll working directory ของ `/watchfile` (วินาที) |
+| `-ntfy-url` | `JONNYQ_NTFY_URL` | (ว่าง — ปิดการแจ้งเตือน) | ntfy.sh (หรือ self-hosted) topic URL เต็ม ๆ สำหรับแจ้งเตือนตอน `/plan`/`/coding` ทำงานจบ เช่น `https://ntfy.sh/my-topic` |
 
 ตัวอย่างการรัน:
 
@@ -136,6 +138,7 @@ JONNYQ_MODEL=llama3 ./jonnyq
 | `/coding` | ทำ task แรกที่ยังไม่เสร็จใน `.progress` **แค่ 1 ข้อแล้วหยุด** (ต้องมี `.progress` อยู่แล้ว ถ้ายังไม่มีให้สั่ง `/plan` ก่อน) |
 | `/autocoding` | พฤติกรรมเดิมของ `/coding` ก่อนแยกคำสั่ง: เรียก `/plan` ให้อัตโนมัติถ้าจำเป็น แล้วไล่ทำทุก task ใน `.progress` รวดเดียวจนครบ |
 | `/watchfile [<word>\|off]` | ไม่มี argument: เริ่ม/หยุด watch สลับกัน (toggle) ด้วย magic word ปัจจุบัน; ใส่ magic word: ตั้ง/เริ่ม watch ด้วยคำนั้น (ถ้ากำลัง watch อยู่แล้วจะเปลี่ยนคำแบบ live ไม่ restart); `off`/`stop`: หยุด watch ชัดเจน |
+| `/ntfy [<topic url>\|off]` | ไม่มี argument: แสดงค่าปัจจุบัน; ใส่ URL: ตั้ง/เปิดการแจ้งเตือนด้วย topic นั้น; `off`: ปิดการแจ้งเตือน — มีผลกับ `/plan`/`/coding` ในครั้งถัดไปทันที |
 | `/exit`, `/bye` | ออกจากโปรแกรม |
 
 ถ้ายังไม่ได้ตั้ง `-model`/`JONNYQ_MODEL` โปรแกรมจะแจ้งเตือนก่อนแสดง prompt และรับได้เฉพาะ slash command เท่านั้น จนกว่าจะสั่ง `/model <name>`
@@ -178,5 +181,6 @@ internal/repl/     prompt loop + slash commands
 internal/skill/    skill discovery
 internal/coding/   /plan, /coding, /autocoding automation + .progress
 internal/watch/    /watchfile: poll working directory หา magic word (stdlib-only, ไม่ใช้ fsnotify)
+internal/notify/   /ntfy: ส่ง push notification ไปยัง ntfy.sh/self-hosted server
 internal/ui/       สีของ terminal + log แบบ plain text
 ```

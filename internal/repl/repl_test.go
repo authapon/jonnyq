@@ -142,6 +142,32 @@ func TestToggleWatchOffWhenNotWatchingIsHarmless(t *testing.T) {
 	}
 }
 
+func TestToggleNtfySetsURL(t *testing.T) {
+	r := newTestREPL(t)
+	r.toggleNtfy("https://ntfy.sh/my-topic")
+	if r.Cfg.NtfyURL != "https://ntfy.sh/my-topic" {
+		t.Errorf("expected NtfyURL to be set, got %q", r.Cfg.NtfyURL)
+	}
+}
+
+func TestToggleNtfyOffClearsURL(t *testing.T) {
+	r := newTestREPL(t)
+	r.Cfg.NtfyURL = "https://ntfy.sh/my-topic"
+	r.toggleNtfy("off")
+	if r.Cfg.NtfyURL != "" {
+		t.Errorf("expected NtfyURL to be cleared, got %q", r.Cfg.NtfyURL)
+	}
+}
+
+func TestToggleNtfyBareLeavesURLUnchanged(t *testing.T) {
+	r := newTestREPL(t)
+	r.Cfg.NtfyURL = "https://ntfy.sh/my-topic"
+	r.toggleNtfy("")
+	if r.Cfg.NtfyURL != "https://ntfy.sh/my-topic" {
+		t.Errorf("expected a bare /ntfy to leave NtfyURL unchanged, got %q", r.Cfg.NtfyURL)
+	}
+}
+
 func TestExitAndByeBothExit(t *testing.T) {
 	for _, cmd := range []string{"/exit", "/bye"} {
 		r := newTestREPL(t)
