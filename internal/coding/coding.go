@@ -19,8 +19,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"jonnyq/internal/agent"
+	"jonnyq/internal/llm"
 	"jonnyq/internal/notify"
 	"jonnyq/internal/ui"
 )
@@ -120,6 +122,31 @@ func notifyOrWarn(ctx context.Context, n *notify.Notifier, w *ui.Writer, title, 
 	if err := n.Send(ctx, title, message); err != nil {
 		w.Plainln("warning: ntfy notification failed: " + err.Error())
 	}
+}
+
+// notifyTimestampLayout matches the timezone-qualified format already used
+// for the "current date and time" line in the system message, so a
+// notification's timestamps read consistently with what the model itself
+// was told.
+const notifyTimestampLayout = "2006-01-02 15:04:05 MST"
+
+// withTiming appends a start/finish/duration/stats footer to summary, using
+// u (typically ag.LastUsage right after the RunTurn call that did the
+// work) for the same preload/prompt_eval/thinking/token figures shown in
+// the terminal's own metrics line - so a notification tells the full story
+// without needing the terminal open. Pass a zero-value llm.Usage{} when no
+// RunTurn call happened (e.g. "all tasks already complete"); FormatUsage
+// renders that as all "n/a" rather than stale figures from an unrelated
+// earlier turn.
+func withTiming(summary string, start, end time.Time, u llm.Usage) string {
+	return fmt.Sprintf(
+		"%s\n\nStarted: %s\nFinished: %s\nDuration: %s\nStats: %s",
+		summary,
+		start.Format(notifyTimestampLayout),
+		end.Format(notifyTimestampLayout),
+		end.Sub(start).Round(time.Millisecond),
+		agent.FormatUsage(u),
+	)
 }
 
 func fileHash(data []byte) string {
@@ -280,6 +307,7 @@ func buildTaskPrompt(taskText string, stall int, prevUntouched bool) string {
 // (generating or reconciling) - pass nil/a disabled Notifier to skip
 // notifying, as AutoRun does for its own internal Plan call.
 func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) error {
+	start := time.Now()
 	reqPath := filepath.Join(workDir, requirementsFile)
 	reqData, err := os.ReadFile(reqPath)
 	if err != nil {
@@ -304,9 +332,8 @@ func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n 
 		if err := writeStoredHash(hashPath, currentHash); err != nil {
 			return fmt.Errorf("recording requirements hash: %w", err)
 		}
-		notifyOrWarn(ctx, n, w, "jonnyq: /plan complete", fmt.Sprintf(
-			"Generated %s from %s: %s", progressFile, requirementsFile, progressSummaryLine(tasks),
-		))
+		summary := fmt.Sprintf("Generated %s from %s: %s", progressFile, requirementsFile, progressSummaryLine(tasks))
+		notifyOrWarn(ctx, n, w, "jonnyq: /plan complete", withTiming(summary, start, time.Now(), ag.LastUsage))
 		return nil
 	}
 
@@ -324,10 +351,11 @@ func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n 
 		return fmt.Errorf("recording requirements hash: %w", err)
 	}
 	tasksAfter, _ := parseProgress(progPath)
-	notifyOrWarn(ctx, n, w, "jonnyq: /plan complete", fmt.Sprintf(
+	summary := fmt.Sprintf(
 		"Reconciled %s against %s: %d tasks total (was %d), %s",
 		progressFile, requirementsFile, len(tasksAfter), len(tasksBefore), progressSummaryLine(tasksAfter),
-	))
+	)
+	notifyOrWarn(ctx, n, w, "jonnyq: /plan complete", withTiming(summary, start, time.Now(), ag.LastUsage))
 	return nil
 }
 
@@ -338,6 +366,7 @@ func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n 
 // already done, this task completed, or this task stalled out) - pass
 // nil/a disabled Notifier to skip notifying.
 func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) error {
+	start := time.Now()
 	progPath := filepath.Join(workDir, progressFile)
 	if _, err := os.Stat(progPath); err != nil {
 		return fmt.Errorf("%s not found; run /plan first to generate it from %s", progressFile, requirementsFile)
@@ -350,7 +379,11 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 	next, ok := firstUnfinished(tasks)
 	if !ok {
 		w.Plainln("[coding] all tasks in " + progressFile + " are checked off")
-		notifyOrWarn(ctx, n, w, "jonnyq: /coding complete", fmt.Sprintf("All tasks already complete: %s", progressSummaryLine(tasks)))
+		summary := fmt.Sprintf("All tasks already complete: %s", progressSummaryLine(tasks))
+		// No RunTurn call happened, so there's no fresh LastUsage to report
+		// - a zero-value llm.Usage renders as "n/a" rather than stale
+		// figures from an unrelated earlier turn.
+		notifyOrWarn(ctx, n, w, "jonnyq: /coding complete", withTiming(summary, start, time.Now(), llm.Usage{}))
 		return nil
 	}
 
@@ -380,10 +413,11 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 		newCount := stall + 1
 		if newCount >= maxStallRounds {
 			clearRetryState(retryPath)
-			notifyOrWarn(ctx, n, w, "jonnyq: /coding stalled", fmt.Sprintf(
+			summary := fmt.Sprintf(
 				"Task %q made no progress after %d attempts; check %s and requirements.md manually. %s",
 				next.text, maxStallRounds, progressFile, progressSummaryLine(tasksAfter),
-			))
+			)
+			notifyOrWarn(ctx, n, w, "jonnyq: /coding stalled", withTiming(summary, start, time.Now(), ag.LastUsage))
 			return fmt.Errorf("task %q made no progress after %d attempts via /coding; check %s and requirements.md manually", next.text, maxStallRounds, progressFile)
 		}
 		untouched := progressUnchanged(progPath, before)
@@ -393,7 +427,8 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 		return nil
 	}
 	clearRetryState(retryPath)
-	notifyOrWarn(ctx, n, w, "jonnyq: /coding complete", fmt.Sprintf("Completed: %q\n%s", next.text, progressSummaryLine(tasksAfter)))
+	summary := fmt.Sprintf("Completed: %q\n%s", next.text, progressSummaryLine(tasksAfter))
+	notifyOrWarn(ctx, n, w, "jonnyq: /coding complete", withTiming(summary, start, time.Now(), ag.LastUsage))
 	return nil
 }
 

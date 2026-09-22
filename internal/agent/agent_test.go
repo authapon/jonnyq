@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"jonnyq/internal/llm"
@@ -122,6 +123,37 @@ func TestRunTurnExecutesToolCallThenFinalAnswer(t *testing.T) {
 	}
 	if !strings.Contains(log, "token_in=13") || !strings.Contains(log, "token_out=3") || !strings.Contains(log, "total_token=16") {
 		t.Errorf("expected aggregated usage across both provider calls, got: %s", log)
+	}
+
+	if a.LastUsage.TotalTokens != 16 {
+		t.Errorf("expected LastUsage.TotalTokens to be the aggregated 16, got %d", a.LastUsage.TotalTokens)
+	}
+	if a.LastUsage.PromptTokens != 13 || a.LastUsage.CompletionTokens != 3 {
+		t.Errorf("expected LastUsage to hold the aggregated prompt/completion tokens, got %+v", a.LastUsage)
+	}
+	if a.LastTurnElapsed <= 0 {
+		t.Errorf("expected LastTurnElapsed to be a positive duration, got %v", a.LastTurnElapsed)
+	}
+}
+
+func TestFormatUsageMatchesTerminalMetricsLine(t *testing.T) {
+	u := llm.Usage{
+		PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150,
+		LoadDuration: 1200 * time.Millisecond, PromptEvalDuration: 300 * time.Millisecond, EvalDuration: 2 * time.Second,
+		HasTiming: true,
+	}
+	got := FormatUsage(u)
+	want := "preload=1.2s prompt_eval=300ms thinking=2s token_in=100 token_out=50 total_token=150 tok/s=25.00"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFormatUsageHandlesMissingTimingAndTokens(t *testing.T) {
+	got := FormatUsage(llm.Usage{})
+	want := "preload=n/a prompt_eval=n/a thinking=n/a token_in=n/a token_out=n/a total_token=n/a tok/s=n/a"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 

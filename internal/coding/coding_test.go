@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"jonnyq/internal/agent"
 	"jonnyq/internal/llm"
@@ -118,6 +119,16 @@ func contentStep(text string) step {
 	return step{events: []llm.ChatEvent{
 		{Kind: llm.EventContent, Delta: text},
 		doneEvent(),
+	}}
+}
+
+// contentStepWithUsage is like contentStep but carries real Usage figures
+// on the Done event, for tests asserting that RunTurn's aggregated usage
+// makes it all the way into a notification's timing/stats footer.
+func contentStepWithUsage(text string, u llm.Usage) step {
+	return step{events: []llm.ChatEvent{
+		{Kind: llm.EventContent, Delta: text},
+		{Kind: llm.EventDone, Usage: u},
 	}}
 }
 
@@ -283,7 +294,12 @@ func TestPlanNotifiesOnGenerate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, requirementsFile), []byte("build a thing"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	p := &sequenceProvider{t: t, steps: []step{writeFileStep("- [ ] task one\n- [x] task two\n"), contentStep("ok")}}
+	usage := llm.Usage{
+		PromptTokens: 500, CompletionTokens: 120, TotalTokens: 620,
+		LoadDuration: 200 * time.Millisecond, PromptEvalDuration: 80 * time.Millisecond, EvalDuration: 4 * time.Second,
+		HasTiming: true,
+	}
+	p := &sequenceProvider{t: t, steps: []step{writeFileStep("- [ ] task one\n- [x] task two\n"), contentStepWithUsage("ok", usage)}}
 	ag := newTestAgent(t, dir, p)
 	capture := newCaptureNotify(t)
 
@@ -298,6 +314,15 @@ func TestPlanNotifiesOnGenerate(t *testing.T) {
 	}
 	if !strings.Contains(capture.body, "1/2 tasks done") {
 		t.Errorf("expected the notification body to summarize progress, got: %q", capture.body)
+	}
+	if !strings.Contains(capture.body, "Started:") || !strings.Contains(capture.body, "Finished:") || !strings.Contains(capture.body, "Duration:") {
+		t.Errorf("expected the notification body to include start/finish/duration, got: %q", capture.body)
+	}
+	if !strings.Contains(capture.body, "token_in=500") || !strings.Contains(capture.body, "token_out=120") || !strings.Contains(capture.body, "total_token=620") {
+		t.Errorf("expected the notification body to include the real token stats, got: %q", capture.body)
+	}
+	if !strings.Contains(capture.body, "preload=200ms") || !strings.Contains(capture.body, "prompt_eval=80ms") || !strings.Contains(capture.body, "thinking=4s") {
+		t.Errorf("expected the notification body to include the real timing stats, got: %q", capture.body)
 	}
 }
 
@@ -509,8 +534,13 @@ func TestRunOneTaskNotifiesOnCompletion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [ ] task one\n- [ ] task two\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	usage := llm.Usage{
+		PromptTokens: 300, CompletionTokens: 60, TotalTokens: 360,
+		LoadDuration: 50 * time.Millisecond, PromptEvalDuration: 30 * time.Millisecond, EvalDuration: 2 * time.Second,
+		HasTiming: true,
+	}
 	p := &sequenceProvider{t: t, steps: []step{
-		writeFileStep("- [x] task one\n- [ ] task two\n"), contentStep("done"),
+		writeFileStep("- [x] task one\n- [ ] task two\n"), contentStepWithUsage("done", usage),
 	}}
 	ag := newTestAgent(t, dir, p)
 	capture := newCaptureNotify(t)
@@ -526,6 +556,38 @@ func TestRunOneTaskNotifiesOnCompletion(t *testing.T) {
 	}
 	if !strings.Contains(capture.body, "task one") || !strings.Contains(capture.body, "1/2 tasks done") {
 		t.Errorf("expected the notification body to name the completed task and overall progress, got: %q", capture.body)
+	}
+	if !strings.Contains(capture.body, "Started:") || !strings.Contains(capture.body, "Finished:") || !strings.Contains(capture.body, "Duration:") {
+		t.Errorf("expected the notification body to include start/finish/duration, got: %q", capture.body)
+	}
+	if !strings.Contains(capture.body, "token_in=300") || !strings.Contains(capture.body, "total_token=360") {
+		t.Errorf("expected the notification body to include the real token stats, got: %q", capture.body)
+	}
+}
+
+// TestRunOneTaskAllDoneNotificationHasNoStaleUsage guards against a subtle
+// leak: when there's nothing to do, RunOneTask returns before ever calling
+// RunTurn, so ag.LastUsage may still hold figures from a completely
+// unrelated earlier turn. The notification must report "n/a" stats for
+// this attempt, not those stale numbers.
+func TestRunOneTaskAllDoneNotificationHasNoStaleUsage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [x] task one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := newTestAgent(t, dir, &sequenceProvider{t: t})
+	// Simulate leftover state from an earlier, unrelated turn.
+	ag.LastUsage = llm.Usage{PromptTokens: 9999, CompletionTokens: 9999, TotalTokens: 19998, HasTiming: true}
+	capture := newCaptureNotify(t)
+
+	if err := RunOneTask(context.Background(), ag, ag.UI, dir, capture.notifier()); err != nil {
+		t.Fatalf("RunOneTask failed: %v", err)
+	}
+	if strings.Contains(capture.body, "9999") {
+		t.Errorf("expected no stale usage figures in the notification, got: %q", capture.body)
+	}
+	if !strings.Contains(capture.body, "token_in=n/a") {
+		t.Errorf("expected n/a token stats since no RunTurn call happened, got: %q", capture.body)
 	}
 }
 

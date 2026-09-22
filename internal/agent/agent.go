@@ -70,6 +70,17 @@ type Agent struct {
 	CodingMode bool
 
 	History []llm.Message
+
+	// LastUsage and LastTurnElapsed hold the most recently completed
+	// RunTurn call's aggregated LLM usage and wall-clock duration, exposed
+	// so callers (e.g. /plan and /coding's ntfy notifications) can report
+	// the same figures shown in the terminal's own metrics line without
+	// re-deriving them. Stale (left over from an earlier turn) if RunTurn
+	// hasn't been called since the caller last checked - callers that need
+	// to tell "no turn happened" apart from "a turn happened with zero
+	// usage" must track that separately.
+	LastUsage       llm.Usage
+	LastTurnElapsed time.Duration
 }
 
 // decisiveThinkingPrompt is included in every system message, regardless of
@@ -301,6 +312,8 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 
 	elapsed := time.Since(start)
 	a.printMetrics(totalUsage, elapsed)
+	a.LastUsage = totalUsage
+	a.LastTurnElapsed = elapsed
 
 	if a.shouldCompact() {
 		a.compact(ctx)
@@ -341,6 +354,16 @@ func (a *Agent) shouldCompact() bool {
 }
 
 func (a *Agent) printMetrics(u llm.Usage, wallClock time.Duration) {
+	msg := fmt.Sprintf("[%s wall=%s]", FormatUsage(u), wallClock.Round(time.Millisecond))
+	a.UI.Meta(msg)
+}
+
+// FormatUsage renders u's timing/token figures the same way the terminal's
+// end-of-turn metrics line does (preload/prompt_eval/thinking durations,
+// token in/out/total, tokens/sec) - exported for reuse anywhere the same
+// stats need reporting outside the UI, e.g. /plan and /coding's ntfy
+// notifications.
+func FormatUsage(u llm.Usage) string {
 	fmtDur := func(d time.Duration) string {
 		if !u.HasTiming {
 			return "n/a"
@@ -357,12 +380,11 @@ func (a *Agent) printMetrics(u llm.Usage, wallClock time.Duration) {
 	if u.HasTiming && u.EvalDuration > 0 && u.CompletionTokens > 0 {
 		tps = fmt.Sprintf("%.2f", float64(u.CompletionTokens)/u.EvalDuration.Seconds())
 	}
-	msg := fmt.Sprintf(
-		"[preload=%s prompt_eval=%s thinking=%s token_in=%s token_out=%s total_token=%s tok/s=%s wall=%s]",
+	return fmt.Sprintf(
+		"preload=%s prompt_eval=%s thinking=%s token_in=%s token_out=%s total_token=%s tok/s=%s",
 		fmtDur(u.LoadDuration), fmtDur(u.PromptEvalDuration), fmtDur(u.EvalDuration),
-		tokIn, tokOut, tokTotal, tps, wallClock.Round(time.Millisecond),
+		tokIn, tokOut, tokTotal, tps,
 	)
-	a.UI.Meta(msg)
 }
 
 // compact summarizes History into a single message, bounded to roughly
