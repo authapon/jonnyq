@@ -84,6 +84,13 @@ type Agent struct {
 	SkillPaths          []string
 	UI                  *ui.Writer
 
+	// OutputFile is the transcript log path (e.g. "output.txt") the
+	// terminal UI mirrors its own output to - purely a runtime log, never
+	// project content. When set, buildSystemMessage tells the model to
+	// disregard it entirely, so /watchfile-style directory scans or a
+	// curious read_file call don't waste a turn on jonnyq's own log.
+	OutputFile string
+
 	// ToolCallMode selects native (default) vs. prompt-based tool calling.
 	// See ToolCallModeNative/ToolCallModePrompt.
 	ToolCallMode ToolCallMode
@@ -167,6 +174,14 @@ func (a *Agent) buildSystemMessage() llm.Message {
 	sb.WriteString(now)
 	sb.WriteString("\n")
 	sb.WriteString(decisiveThinkingPrompt)
+	if a.OutputFile != "" {
+		fmt.Fprintf(&sb,
+			"Ignore %s if you come across it in the working directory - it is this program's own runtime transcript "+
+				"log (a mirror of what's printed to the terminal), not part of the project. You never need to read it, "+
+				"inspect it, or take its contents into account for any task.\n",
+			a.OutputFile,
+		)
+	}
 	if a.ToolCallMode == ToolCallModePrompt {
 		sb.WriteString(buildPromptToolCallSection(a.Tools.Specs()))
 	}

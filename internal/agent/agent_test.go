@@ -454,3 +454,23 @@ func TestSystemMessageAlwaysIncludesDecisiveThinkingDirective(t *testing.T) {
 		t.Errorf("expected the decisive-thinking directive in coding mode too, got: %s", coding.Content)
 	}
 }
+
+func TestSystemMessageTellsModelToIgnoreTheOutputLogFile(t *testing.T) {
+	a, _, _ := newTestAgent(t, nil)
+	a.OutputFile = "output.txt"
+
+	msg := a.buildSystemMessage()
+	if !strings.Contains(msg.Content, "Ignore output.txt") {
+		t.Errorf("expected the system message to tell the model to ignore the configured output file, got: %s", msg.Content)
+	}
+}
+
+func TestSystemMessageOmitsOutputFileNoteWhenUnset(t *testing.T) {
+	a, _, _ := newTestAgent(t, nil)
+	a.OutputFile = ""
+
+	msg := a.buildSystemMessage()
+	if strings.Contains(msg.Content, "Ignore ") {
+		t.Errorf("expected no output-file note when OutputFile is unset, got: %s", msg.Content)
+	}
+}
