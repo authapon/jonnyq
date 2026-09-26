@@ -7,6 +7,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -17,6 +18,25 @@ import (
 	"jonnyq/internal/skill"
 	"jonnyq/internal/tools"
 	"jonnyq/internal/ui"
+)
+
+// ToolCallMode selects how the model is asked to invoke tools.
+type ToolCallMode string
+
+const (
+	// ToolCallModeNative uses the provider's native function/tool-calling
+	// protocol (the default): the Tools spec is sent with every request and
+	// calls arrive as structured EventToolCalls.
+	ToolCallModeNative ToolCallMode = "native"
+	// ToolCallModePrompt asks the model, via the system prompt, to emit a
+	// fenced ```tool JSON block in plain text instead of using native
+	// function-calling - for models/backends whose native tool-calling is
+	// unreliable (e.g. it reliably omits required arguments). No Tools spec
+	// is sent to the provider in this mode: sending one while also
+	// prompting for text-based calls tends to trigger a backend's own
+	// (sometimes broken) function-calling grammar constraints, which is
+	// exactly the failure mode this exists to route around.
+	ToolCallModePrompt ToolCallMode = "prompt"
 )
 
 // approxCharsPerToken is a rough, tokenizer-free heuristic (no real
@@ -63,6 +83,10 @@ type Agent struct {
 	Tools               *tools.Registry
 	SkillPaths          []string
 	UI                  *ui.Writer
+
+	// ToolCallMode selects native (default) vs. prompt-based tool calling.
+	// See ToolCallModeNative/ToolCallModePrompt.
+	ToolCallMode ToolCallMode
 
 	// CodingMode, when true, appends codingModePrompt to the system message.
 	// /coding sets this for the duration of its run so the model is held to
@@ -122,6 +146,7 @@ func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool
 		Tools:               reg,
 		SkillPaths:          skillPaths,
 		UI:                  w,
+		ToolCallMode:        ToolCallModeNative,
 	}
 }
 
@@ -142,6 +167,9 @@ func (a *Agent) buildSystemMessage() llm.Message {
 	sb.WriteString(now)
 	sb.WriteString("\n")
 	sb.WriteString(decisiveThinkingPrompt)
+	if a.ToolCallMode == ToolCallModePrompt {
+		sb.WriteString(buildPromptToolCallSection(a.Tools.Specs()))
+	}
 	skills := skill.Discover(a.SkillPaths)
 	if len(skills) > 0 {
 		sb.WriteString("Available skills (use read_skill with a name below to load its full content):\n")
@@ -194,10 +222,18 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 		// touching the turn's overall ctx (which callers still use for
 		// Ctrl-C).
 		chatCtx, cancelChat := context.WithCancel(ctx)
+		// In prompt mode, deliberately omit Tools: sending a native tool
+		// spec while also prompting the model to emit text-based calls
+		// tends to trigger a backend's own function-calling grammar
+		// constraints - the very thing this mode exists to route around.
+		var toolSpecs []llm.ToolSpec
+		if a.ToolCallMode != ToolCallModePrompt {
+			toolSpecs = a.Tools.Specs()
+		}
 		events, err := a.Provider.Chat(chatCtx, llm.ChatRequest{
 			Model:       a.Model,
 			Messages:    messages,
-			Tools:       a.Tools.Specs(),
+			Tools:       toolSpecs,
 			Thinking:    a.Thinking,
 			ContextSize: a.ContextSize,
 		})
@@ -267,6 +303,13 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 		}
 		totalUsage = sumUsage(totalUsage, roundUsage)
 
+		// In prompt mode the provider never emits EventToolCalls (no Tools
+		// spec was sent), so a requested call instead shows up as a
+		// ```tool fenced block within the plain content just streamed.
+		if a.ToolCallMode == ToolCallModePrompt && len(pendingCalls) == 0 {
+			pendingCalls = parsePromptToolCalls(assistantContent.String())
+		}
+
 		if len(pendingCalls) == 0 {
 			a.UI.Plainln("")
 			a.History = append(a.History, llm.Message{Role: llm.RoleAssistant, Content: assistantContent.String()})
@@ -278,25 +321,59 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 		}
 		remainingToolBudget -= len(pendingCalls)
 
-		a.History = append(a.History, llm.Message{
-			Role:      llm.RoleAssistant,
-			Content:   assistantContent.String(),
-			ToolCalls: pendingCalls,
-		})
+		assistantMsg := llm.Message{Role: llm.RoleAssistant, Content: assistantContent.String()}
+		if a.ToolCallMode != ToolCallModePrompt {
+			// Only attach native ToolCalls when we actually asked for
+			// native tool-calling - in prompt mode the raw ```tool block is
+			// already part of Content, and echoing it back to the provider
+			// wrapped in a native tool_calls field (when no Tools spec was
+			// ever sent) risks confusing or being rejected by a backend not
+			// expecting the function-calling wire format at all.
+			assistantMsg.ToolCalls = pendingCalls
+		}
+		a.History = append(a.History, assistantMsg)
 
 		for _, tc := range pendingCalls {
-			a.UI.ToolCall(fmt.Sprintf("%s(%s)", tc.Name, tc.Arguments))
-			result, err := a.Tools.Call(ctx, tc.Name, tc.Arguments)
+			var result string
+			var err error
+			if tc.Name == parseErrorToolName {
+				// A malformed ```tool block from parsePromptToolCalls -
+				// report the actual parse problem rather than routing
+				// through Tools.Call (which would just say "unknown tool"),
+				// and skip the sentinel name in anything shown to the user
+				// or fed back to the model.
+				a.UI.ToolCall("malformed ```tool block: " + tc.Arguments)
+				err = errors.New(tc.Arguments)
+			} else {
+				a.UI.ToolCall(fmt.Sprintf("%s(%s)", tc.Name, tc.Arguments))
+				result, err = a.Tools.Call(ctx, tc.Name, tc.Arguments)
+			}
 			if err != nil {
 				result = "error: " + err.Error()
-				a.UI.ToolCall(fmt.Sprintf("%s: error: %v", tc.Name, err))
+				if tc.Name != parseErrorToolName {
+					a.UI.ToolCall(fmt.Sprintf("%s: error: %v", tc.Name, err))
+				}
 			}
-			a.History = append(a.History, llm.Message{
-				Role:       llm.RoleTool,
-				Content:    result,
-				ToolCallID: tc.ID,
-				Name:       tc.Name,
-			})
+			if a.ToolCallMode == ToolCallModePrompt {
+				// A plain user-role message, not RoleTool: the "tool"
+				// role/tool_call_id pairing is an OpenAI-style
+				// function-calling convention that a model relying on
+				// prompt mode (because its native tool-calling is
+				// unreliable) may not understand or a backend may not
+				// accept at all when no Tools spec was ever sent.
+				content := fmt.Sprintf("Tool result (%s): %s", tc.Name, result)
+				if tc.Name == parseErrorToolName {
+					content = result
+				}
+				a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: content})
+			} else {
+				a.History = append(a.History, llm.Message{
+					Role:       llm.RoleTool,
+					Content:    result,
+					ToolCallID: tc.ID,
+					Name:       tc.Name,
+				})
+			}
 		}
 
 		// Check after every tool round, not just at the end of the turn: a

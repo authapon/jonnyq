@@ -20,9 +20,11 @@ import (
 type sequenceProvider struct {
 	calls     int
 	responses [][]llm.ChatEvent
+	sentReqs  []llm.ChatRequest
 }
 
 func (p *sequenceProvider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan llm.ChatEvent, error) {
+	p.sentReqs = append(p.sentReqs, req)
 	idx := p.calls
 	p.calls++
 	events := p.responses[idx]
@@ -133,6 +135,116 @@ func TestRunTurnExecutesToolCallThenFinalAnswer(t *testing.T) {
 	}
 	if a.LastTurnElapsed <= 0 {
 		t.Errorf("expected LastTurnElapsed to be a positive duration, got %v", a.LastTurnElapsed)
+	}
+}
+
+// TestRunTurnPromptModeOmitsNativeToolsAndDescribesThemInPrompt guards the
+// core design decision of ToolCallModePrompt: the native Tools spec must
+// never be sent (sending it while also prompting for text-based calls
+// tends to trigger a backend's own function-calling grammar constraints -
+// the very failure mode this mode exists to route around), and the system
+// message must describe each tool instead so the model has the same
+// information it would have gotten via the API.
+func TestRunTurnPromptModeOmitsNativeToolsAndDescribesThemInPrompt(t *testing.T) {
+	responses := [][]llm.ChatEvent{
+		{{Kind: llm.EventContent, Delta: "no tool needed"}, {Kind: llm.EventDone}},
+	}
+	a, _, _ := newTestAgent(t, responses)
+	a.ToolCallMode = ToolCallModePrompt
+
+	if err := a.RunTurn(context.Background(), "hi"); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	p := a.Provider.(*sequenceProvider)
+	if len(p.sentReqs) != 1 {
+		t.Fatalf("expected exactly 1 request, got %d", len(p.sentReqs))
+	}
+	if p.sentReqs[0].Tools != nil {
+		t.Errorf("expected no native Tools spec sent in prompt mode, got: %+v", p.sentReqs[0].Tools)
+	}
+	sysMsg := p.sentReqs[0].Messages[0].Content
+	if !strings.Contains(sysMsg, "TOOL CALLING (PROMPT MODE)") {
+		t.Errorf("expected the system message to include the prompt-mode instructions, got: %s", sysMsg)
+	}
+	if !strings.Contains(sysMsg, "echo: echoes text") {
+		t.Errorf("expected the system message to describe the registered echo tool, got: %s", sysMsg)
+	}
+}
+
+// TestRunTurnPromptModeExecutesToolCallFromFencedBlock reproduces the
+// actual point of this mode: a model with no native tool-calling event at
+// all (EventContent only) can still trigger a real tool call by emitting a
+// ```tool fenced JSON block as plain text.
+func TestRunTurnPromptModeExecutesToolCallFromFencedBlock(t *testing.T) {
+	responses := [][]llm.ChatEvent{
+		{
+			{Kind: llm.EventContent, Delta: "```tool\n" + `{"name": "echo", "arguments": {"text": "hi"}}` + "\n```"},
+			{Kind: llm.EventDone},
+		},
+		{
+			{Kind: llm.EventContent, Delta: "all done"},
+			{Kind: llm.EventDone},
+		},
+	}
+	a, et, _ := newTestAgent(t, responses)
+	a.ToolCallMode = ToolCallModePrompt
+
+	if err := a.RunTurn(context.Background(), "please echo hi"); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if !et.called {
+		t.Fatal("expected the echo tool to have been called from the fenced block")
+	}
+
+	var sawToolResult, sawNativeToolCallsField bool
+	for _, m := range a.History {
+		if m.Role == llm.RoleUser && strings.Contains(m.Content, "Tool result (echo): echoed: hi") {
+			sawToolResult = true
+		}
+		if len(m.ToolCalls) > 0 {
+			sawNativeToolCallsField = true
+		}
+	}
+	if !sawToolResult {
+		t.Errorf("expected a plain user-role tool-result message, got history: %+v", a.History)
+	}
+	if sawNativeToolCallsField {
+		t.Error("expected no message to carry a native ToolCalls field in prompt mode")
+	}
+}
+
+// TestRunTurnPromptModeReportsMalformedBlockAsError confirms a ```tool
+// block that fails to parse produces clear, actionable feedback (not a
+// generic "unknown tool" from Tools.Call, and not a silently ignored turn).
+func TestRunTurnPromptModeReportsMalformedBlockAsError(t *testing.T) {
+	responses := [][]llm.ChatEvent{
+		{
+			{Kind: llm.EventContent, Delta: "```tool\nnot valid json\n```"},
+			{Kind: llm.EventDone},
+		},
+		{
+			{Kind: llm.EventContent, Delta: "sorry, let me retry"},
+			{Kind: llm.EventDone},
+		},
+	}
+	a, et, _ := newTestAgent(t, responses)
+	a.ToolCallMode = ToolCallModePrompt
+
+	if err := a.RunTurn(context.Background(), "please echo hi"); err != nil {
+		t.Fatalf("RunTurn failed: %v", err)
+	}
+	if et.called {
+		t.Error("expected the echo tool NOT to have been called for a malformed block")
+	}
+
+	var sawParseError bool
+	for _, m := range a.History {
+		if m.Role == llm.RoleUser && strings.Contains(m.Content, "error: invalid JSON") {
+			sawParseError = true
+		}
+	}
+	if !sawParseError {
+		t.Errorf("expected a clear parse-error tool result in history, got: %+v", a.History)
 	}
 }
 

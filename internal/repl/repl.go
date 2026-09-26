@@ -37,6 +37,7 @@ const helpText = `Slash commands:
   /autocoding                       plan if needed, then work through every task in .progress in one run (Ctrl-C cancels)
   /watchfile [<word>|off]           watch the working directory for a magic word (default "AI!") and act on it when found
   /ntfy [<topic url>|off]           set/clear the ntfy.sh topic URL for /plan and /coding completion notifications
+  /toolmode [native|prompt]         switch how tools are called: native tool-calling (default) or a plain-text fenced JSON block for models with unreliable native tool-calling
   /exit  /bye                       exit jonnyq
 
 Multi-line prompts: end a line with a trailing backslash to continue it on
@@ -326,6 +327,9 @@ func (r *REPL) handleSlash(ctx context.Context, line string, watchTriggers chan<
 	case "/ntfy":
 		r.toggleNtfy(rest)
 
+	case "/toolmode":
+		r.setToolMode(rest)
+
 	default:
 		r.UI.Plainln("unknown command " + cmd + "; try /help")
 	}
@@ -400,6 +404,30 @@ func (r *REPL) toggleNtfy(arg string) {
 
 	r.Cfg.NtfyURL = arg
 	r.UI.Plainln("[ntfy] notifications enabled: " + arg)
+}
+
+// setToolMode implements /toolmode: bare shows the current mode, "native"
+// or "prompt" switches it. Takes effect on the Agent's next turn - there's
+// no separate state to keep in sync since Agent.ToolCallMode is read fresh
+// each RunTurn call.
+func (r *REPL) setToolMode(arg string) {
+	arg = strings.TrimSpace(strings.ToLower(arg))
+
+	if arg == "" {
+		r.UI.Plainln(fmt.Sprintf("[toolmode] current mode: %s (usage: /toolmode native|prompt)", r.Agent.ToolCallMode))
+		return
+	}
+
+	switch arg {
+	case "native":
+		r.Agent.ToolCallMode = agent.ToolCallModeNative
+		r.UI.Plainln("[toolmode] switched to native tool-calling")
+	case "prompt":
+		r.Agent.ToolCallMode = agent.ToolCallModePrompt
+		r.UI.Plainln("[toolmode] switched to prompt-based tool-calling (```tool JSON blocks)")
+	default:
+		r.UI.Plainln("usage: /toolmode native|prompt")
+	}
 }
 
 func (r *REPL) rebuildProvider() error {

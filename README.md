@@ -31,6 +31,19 @@ Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, �
   Stats: preload=1.2s prompt_eval=340ms thinking=95.4s token_in=4521 token_out=812 total_token=5333 tok/s=8.51
   ```
   กรณีที่ไม่มีการเรียก model จริง (เช่น task ทำครบหมดแล้วไม่มีอะไรต้องทำ) ค่าสถิติจะเป็น `n/a` ทั้งหมดแทนที่จะโชว์ตัวเลขค้างจาก turn ก่อนหน้าที่ไม่เกี่ยวข้อง — `/autocoding` **ไม่แจ้งเตือนเอง** (ตามที่ตั้งใจไว้ เพราะมันเรียก `/plan` ภายในให้อัตโนมัติ ถ้าแจ้งด้วยจะรัวข้อความทุก task) หากส่ง notification ไม่สำเร็จ (เช่น network error) จะขึ้น warning เฉย ๆ ไม่ทำให้ `/plan`/`/coding` ล้มเหลวไปด้วย
+- **`/toolmode [native|prompt]`** — สำหรับ model/backend ที่เรียก native tool-calling ไม่เสถียร (เช่น ส่ง argument ผิด/ขาด field ที่จำเป็นซ้ำ ๆ) เปลี่ยนวิธีเรียก tool มาใช้ plain text แทนได้ โดย default เป็น `native` (พฤติกรรมเดิมทุกอย่าง) เปลี่ยนเป็น `prompt` แล้ว jonnyq จะ:
+  - **ไม่ส่ง native tools spec ให้ provider เลย** (เพราะการส่งพร้อมกับให้ model พิมพ์ call เป็น text มักไปกระตุ้น grammar-constraint ของ backend ที่พังอยู่แล้ว — ตรงข้ามกับที่โหมดนี้ต้องการหลีกเลี่ยง) แล้วอธิบายรายชื่อ tool + JSON schema ของแต่ละตัวลงใน system prompt แทน
+  - รอให้ model ตอบกลับด้วย fenced block รูปแบบ:
+    ````
+    ```tool
+    {"name": "read_file", "arguments": {"path": "data.txt"}}
+    ```
+    ````
+    แล้ว parse ออกมาเรียก tool จริงตาม pipeline เดิมทุกอย่าง (log, history, error handling เหมือนโหมด native)
+  - ส่งผลลัพธ์ tool กลับเป็น **plain user message** (`"Tool result (<tool>): <output>"`) แทนที่จะใช้ `tool` role/`tool_call_id` แบบ native API เพราะ model ที่ต้องพึ่งโหมดนี้ (native ไม่เสถียรอยู่แล้ว) มักไม่เข้าใจ convention นั้น และบาง backend อาจปฏิเสธ request ที่มี tool role โดยไม่เคยประกาศ tools ไว้
+  - ถ้า model ตอบ JSON ผิดรูปแบบหรือขาด `"name"` จะได้ error message ที่ชัดเจนกลับไปทันที (ไม่ผ่าน `Tools.Call` ซึ่งจะแค่บอก "unknown tool" เฉย ๆ) ให้ model แก้ไขแล้วลองใหม่รอบถัดไป
+
+  หมายเหตุ UX: เนื่องจากข้อความ answer ถูก stream ออกจอทีละตัวอักษรแบบ real-time อยู่แล้ว fenced block ดิบ ๆ ที่ model พิมพ์จะโผล่ปนอยู่ใน section "Answer" ตามปกติ (ไม่ได้ถูกซ่อน/ย้ายไปโชว์เฉพาะใน "Tool call" เหมือน native เพราะต้องรู้ล่วงหน้าว่าจะมี block มา ซึ่งขัดกับการ stream สด) แล้วหลังจากนั้นจะมี "Tool call" section ตามมาแสดงผลการ parse/เรียกจริงอีกที ถือเป็น trade-off ที่ยอมรับได้เพื่อคง real-time streaming ไว้เหมือนเดิมทุกโหมด
 
 ## ความปลอดภัย (โดยตั้งใจ)
 
@@ -149,6 +162,7 @@ JONNYQ_MODEL=llama3 ./jonnyq
 | `/autocoding` | พฤติกรรมเดิมของ `/coding` ก่อนแยกคำสั่ง: เรียก `/plan` ให้อัตโนมัติถ้าจำเป็น แล้วไล่ทำทุก task ใน `.progress` รวดเดียวจนครบ |
 | `/watchfile [<word>\|off]` | ไม่มี argument: เริ่ม/หยุด watch สลับกัน (toggle) ด้วย magic word ปัจจุบัน; ใส่ magic word: ตั้ง/เริ่ม watch ด้วยคำนั้น (ถ้ากำลัง watch อยู่แล้วจะเปลี่ยนคำแบบ live ไม่ restart); `off`/`stop`: หยุด watch ชัดเจน |
 | `/ntfy [<topic url>\|off]` | ไม่มี argument: แสดงค่าปัจจุบัน; ใส่ URL: ตั้ง/เปิดการแจ้งเตือนด้วย topic นั้น; `off`: ปิดการแจ้งเตือน — มีผลกับ `/plan`/`/coding` ในครั้งถัดไปทันที |
+| `/toolmode [native\|prompt]` | ไม่มี argument: แสดงโหมดปัจจุบัน; `native`: ใช้ native tool-calling ของ provider (default); `prompt`: ให้ model เรียก tool ผ่านข้อความ fenced JSON block แทน — มีผลกับรอบถัดไปทันที |
 | `/exit`, `/bye` | ออกจากโปรแกรม |
 
 ถ้ายังไม่ได้ตั้ง `-model`/`JONNYQ_MODEL` โปรแกรมจะแจ้งเตือนก่อนแสดง prompt และรับได้เฉพาะ slash command เท่านั้น จนกว่าจะสั่ง `/model <name>`
@@ -186,7 +200,7 @@ internal/llm/      provider interface + ollama.go, openai.go
 internal/tools/    read_file, write_file, edit_file, create_folder,
                     web_search, web_fetch, read_pdf, read_pic,
                     run_command, read_skill
-internal/agent/    tool-calling loop, context compaction, metrics
+internal/agent/    tool-calling loop, context compaction, metrics, /toolmode (native + prompt-based)
 internal/repl/     prompt loop + slash commands
 internal/skill/    skill discovery
 internal/coding/   /plan, /coding, /autocoding automation + .progress

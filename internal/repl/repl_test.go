@@ -168,6 +168,34 @@ func TestToggleNtfyBareLeavesURLUnchanged(t *testing.T) {
 	}
 }
 
+func TestSetToolModeDefaultsToNative(t *testing.T) {
+	r := newTestREPL(t)
+	if r.Agent.ToolCallMode != agent.ToolCallModeNative {
+		t.Errorf("expected the default tool-call mode to be native, got %q", r.Agent.ToolCallMode)
+	}
+}
+
+func TestSetToolModeSwitchesToPromptAndBack(t *testing.T) {
+	r := newTestREPL(t)
+	r.setToolMode("prompt")
+	if r.Agent.ToolCallMode != agent.ToolCallModePrompt {
+		t.Errorf("expected prompt mode, got %q", r.Agent.ToolCallMode)
+	}
+	r.setToolMode("native")
+	if r.Agent.ToolCallMode != agent.ToolCallModeNative {
+		t.Errorf("expected native mode, got %q", r.Agent.ToolCallMode)
+	}
+}
+
+func TestSetToolModeRejectsUnknownValue(t *testing.T) {
+	r := newTestREPL(t)
+	r.setToolMode("prompt")
+	r.setToolMode("bogus")
+	if r.Agent.ToolCallMode != agent.ToolCallModePrompt {
+		t.Errorf("expected an invalid value to leave the mode unchanged, got %q", r.Agent.ToolCallMode)
+	}
+}
+
 func TestExitAndByeBothExit(t *testing.T) {
 	for _, cmd := range []string{"/exit", "/bye"} {
 		r := newTestREPL(t)
