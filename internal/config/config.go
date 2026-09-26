@@ -29,6 +29,7 @@ const (
 	DefaultWatchMagicWord       = "AI!"
 	DefaultWatchPollIntervalSec = 1
 	DefaultNtfyURL              = ""
+	DefaultToolCallMode         = "native"
 )
 
 // Config holds all runtime settings for jonnyq.
@@ -61,6 +62,11 @@ type Config struct {
 	// post a completion summary to, e.g. "https://ntfy.sh/my-topic".
 	// Empty disables notifications.
 	NtfyURL string
+
+	// ToolCallMode is "native" (default) or "prompt" - see
+	// agent.ToolCallModeNative/ToolCallModePrompt. Validated in Load/
+	// SetToolCallMode so callers can rely on it being one of the two.
+	ToolCallMode string
 
 	SkillPaths []string
 
@@ -108,6 +114,17 @@ func (c *Config) SetProvider(s string) error {
 	return nil
 }
 
+// SetToolCallMode validates and sets ToolCallMode ("native" or "prompt",
+// case-insensitive) - see agent.ToolCallModeNative/ToolCallModePrompt.
+func (c *Config) SetToolCallMode(s string) error {
+	mode := strings.ToLower(strings.TrimSpace(s))
+	if mode != "native" && mode != "prompt" {
+		return fmt.Errorf("invalid tool-mode %q, expected native or prompt", s)
+	}
+	c.ToolCallMode = mode
+	return nil
+}
+
 // Load builds a Config from environment variables and then CLI args, with
 // CLI args taking precedence.
 func Load(args []string) (*Config, error) {
@@ -134,6 +151,7 @@ func Load(args []string) (*Config, error) {
 	watchMagicWord := fs.String("watch-magic-word", envString("WATCH_MAGIC_WORD", DefaultWatchMagicWord), "magic word /watchfile scans for in changed files")
 	watchPollIntervalSec := fs.Int("watch-poll-interval-sec", envInt("WATCH_POLL_INTERVAL_SEC", DefaultWatchPollIntervalSec), "/watchfile polling interval in seconds")
 	ntfyURL := fs.String("ntfy-url", envString("NTFY_URL", DefaultNtfyURL), "ntfy.sh (or self-hosted) topic URL for /plan and /coding completion notifications, e.g. https://ntfy.sh/my-topic")
+	toolCallMode := fs.String("tool-mode", envString("TOOL_MODE", DefaultToolCallMode), "tool-calling mode: native or prompt (plain-text fenced JSON block, for models with unreliable native tool-calling)")
 	skillPath := fs.String("skill-path", skillPathStr, "semicolon-separated skill directories")
 	thinking := fs.Bool("thinking", envBool("THINKING", DefaultThinking), "enable model thinking")
 
@@ -161,6 +179,9 @@ func Load(args []string) (*Config, error) {
 	c.WatchMagicWord = *watchMagicWord
 	c.WatchPollIntervalSec = *watchPollIntervalSec
 	c.NtfyURL = *ntfyURL
+	if err := c.SetToolCallMode(*toolCallMode); err != nil {
+		return nil, err
+	}
 	c.Thinking = *thinking
 	if *skillPath != "" {
 		for _, p := range strings.Split(*skillPath, ";") {

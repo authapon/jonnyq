@@ -196,6 +196,22 @@ func TestSetToolModeRejectsUnknownValue(t *testing.T) {
 	}
 }
 
+// TestSetToolModeKeepsConfigInSync mirrors the existing /model pattern
+// (which sets both Cfg.Model and Agent.Model together): Cfg.ToolCallMode
+// must track Agent.ToolCallMode so anything reading Cfg later stays
+// accurate too.
+func TestSetToolModeKeepsConfigInSync(t *testing.T) {
+	r := newTestREPL(t)
+	r.setToolMode("prompt")
+	if r.Cfg.ToolCallMode != "prompt" {
+		t.Errorf("expected Cfg.ToolCallMode to be updated, got %q", r.Cfg.ToolCallMode)
+	}
+	r.setToolMode("native")
+	if r.Cfg.ToolCallMode != "native" {
+		t.Errorf("expected Cfg.ToolCallMode to be updated, got %q", r.Cfg.ToolCallMode)
+	}
+}
+
 func TestExitAndByeBothExit(t *testing.T) {
 	for _, cmd := range []string{"/exit", "/bye"} {
 		r := newTestREPL(t)

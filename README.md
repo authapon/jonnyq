@@ -32,7 +32,7 @@ Coding agent CLI แบบ REPL เขียนด้วย Go (stdlib-first, �
   Stats: preload=1.2s prompt_eval=340ms thinking=95.4s token_in=4521 token_out=812 total_token=5333 tok/s=8.51
   ```
   กรณีที่ไม่มีการเรียก model จริง (เช่น task ทำครบหมดแล้วไม่มีอะไรต้องทำ) ค่าสถิติจะเป็น `n/a` ทั้งหมดแทนที่จะโชว์ตัวเลขค้างจาก turn ก่อนหน้าที่ไม่เกี่ยวข้อง — `/autocoding` **ไม่แจ้งเตือนเอง** (ตามที่ตั้งใจไว้ เพราะมันเรียก `/plan` ภายในให้อัตโนมัติ ถ้าแจ้งด้วยจะรัวข้อความทุก task) หากส่ง notification ไม่สำเร็จ (เช่น network error) จะขึ้น warning เฉย ๆ ไม่ทำให้ `/plan`/`/coding` ล้มเหลวไปด้วย
-- **`/toolmode [native|prompt]`** — สำหรับ model/backend ที่เรียก native tool-calling ไม่เสถียร (เช่น ส่ง argument ผิด/ขาด field ที่จำเป็นซ้ำ ๆ) เปลี่ยนวิธีเรียก tool มาใช้ plain text แทนได้ โดย default เป็น `native` (พฤติกรรมเดิมทุกอย่าง) เปลี่ยนเป็น `prompt` แล้ว jonnyq จะ:
+- **`/toolmode [native|prompt]`** (ตั้งค่าเริ่มต้นได้ผ่าน `-tool-mode`/`JONNYQ_TOOL_MODE` ด้วย ไม่ใช่แค่ slash command) — สำหรับ model/backend ที่เรียก native tool-calling ไม่เสถียร (เช่น ส่ง argument ผิด/ขาด field ที่จำเป็นซ้ำ ๆ) เปลี่ยนวิธีเรียก tool มาใช้ plain text แทนได้ โดย default เป็น `native` (พฤติกรรมเดิมทุกอย่าง) เปลี่ยนเป็น `prompt` แล้ว jonnyq จะ:
   - **ไม่ส่ง native tools spec ให้ provider เลย** (เพราะการส่งพร้อมกับให้ model พิมพ์ call เป็น text มักไปกระตุ้น grammar-constraint ของ backend ที่พังอยู่แล้ว — ตรงข้ามกับที่โหมดนี้ต้องการหลีกเลี่ยง) แล้วอธิบายรายชื่อ tool + JSON schema ของแต่ละตัวลงใน system prompt แทน
   - รอให้ model ตอบกลับด้วย fenced block รูปแบบ:
     ````
@@ -136,6 +136,7 @@ go test ./...
 | `-watch-magic-word` | `JONNYQ_WATCH_MAGIC_WORD` | `AI!` | magic word ที่ `/watchfile` (ไม่ใส่ argument) ใช้ scan หา |
 | `-watch-poll-interval-sec` | `JONNYQ_WATCH_POLL_INTERVAL_SEC` | `1` | ความถี่ในการ poll working directory ของ `/watchfile` (วินาที) |
 | `-ntfy-url` | `JONNYQ_NTFY_URL` | (ว่าง — ปิดการแจ้งเตือน) | ntfy.sh (หรือ self-hosted) topic URL เต็ม ๆ สำหรับแจ้งเตือนตอน `/plan`/`/coding` ทำงานจบ เช่น `https://ntfy.sh/my-topic` |
+| `-tool-mode` | `JONNYQ_TOOL_MODE` | `native` | โหมดเรียก tool เริ่มต้น: `native` หรือ `prompt` (ปรับทีหลังได้ด้วย `/toolmode`) — ค่าอื่นนอกจากสองค่านี้จะ error ตอนเริ่มโปรแกรม |
 
 ตัวอย่างการรัน:
 

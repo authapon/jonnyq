@@ -87,3 +87,59 @@ func TestInvalidProviderRejected(t *testing.T) {
 		t.Error("expected error for unsupported provider name")
 	}
 }
+
+func TestToolModeDefaultsToNative(t *testing.T) {
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ToolCallMode != DefaultToolCallMode {
+		t.Errorf("expected default tool-mode %q, got %q", DefaultToolCallMode, cfg.ToolCallMode)
+	}
+}
+
+func TestToolModeFlagAndEnv(t *testing.T) {
+	cfg, err := Load([]string{"-tool-mode", "prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ToolCallMode != "prompt" {
+		t.Errorf("expected flag to set prompt, got %q", cfg.ToolCallMode)
+	}
+
+	t.Setenv("JONNYQ_TOOL_MODE", "prompt")
+	cfg, err = Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ToolCallMode != "prompt" {
+		t.Errorf("expected env to set prompt, got %q", cfg.ToolCallMode)
+	}
+}
+
+func TestToolModeFlagOverridesEnv(t *testing.T) {
+	t.Setenv("JONNYQ_TOOL_MODE", "prompt")
+	cfg, err := Load([]string{"-tool-mode", "native"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ToolCallMode != "native" {
+		t.Errorf("expected flag to override env, got %q", cfg.ToolCallMode)
+	}
+}
+
+func TestToolModeIsCaseInsensitive(t *testing.T) {
+	cfg, err := Load([]string{"-tool-mode", "PROMPT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ToolCallMode != "prompt" {
+		t.Errorf("expected case-insensitive normalization to prompt, got %q", cfg.ToolCallMode)
+	}
+}
+
+func TestInvalidToolModeRejected(t *testing.T) {
+	if _, err := Load([]string{"-tool-mode", "bogus"}); err == nil {
+		t.Error("expected error for an invalid tool-mode value")
+	}
+}

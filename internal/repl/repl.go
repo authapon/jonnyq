@@ -411,22 +411,23 @@ func (r *REPL) toggleNtfy(arg string) {
 // no separate state to keep in sync since Agent.ToolCallMode is read fresh
 // each RunTurn call.
 func (r *REPL) setToolMode(arg string) {
-	arg = strings.TrimSpace(strings.ToLower(arg))
+	arg = strings.TrimSpace(arg)
 
 	if arg == "" {
 		r.UI.Plainln(fmt.Sprintf("[toolmode] current mode: %s (usage: /toolmode native|prompt)", r.Agent.ToolCallMode))
 		return
 	}
 
-	switch arg {
-	case "native":
-		r.Agent.ToolCallMode = agent.ToolCallModeNative
-		r.UI.Plainln("[toolmode] switched to native tool-calling")
-	case "prompt":
-		r.Agent.ToolCallMode = agent.ToolCallModePrompt
+	if err := r.Cfg.SetToolCallMode(arg); err != nil {
+		r.UI.Plainln("usage: /toolmode native|prompt")
+		return
+	}
+	r.Agent.ToolCallMode = agent.ToolCallMode(r.Cfg.ToolCallMode)
+	switch r.Agent.ToolCallMode {
+	case agent.ToolCallModePrompt:
 		r.UI.Plainln("[toolmode] switched to prompt-based tool-calling (```tool JSON blocks)")
 	default:
-		r.UI.Plainln("usage: /toolmode native|prompt")
+		r.UI.Plainln("[toolmode] switched to native tool-calling")
 	}
 }
 
