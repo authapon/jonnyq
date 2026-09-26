@@ -220,14 +220,31 @@ func clearRetryState(path string) {
 
 func buildGeneratePrompt() string {
 	return fmt.Sprintf(
-		"Read %s and break its requirements down into a checklist of small, independently verifiable implementation tasks, "+
-			"ordered so each task's dependencies come before it. Also look at the existing code in the working directory, if "+
-			"any - don't propose tasks for things already implemented, and account for what's already there. Write the "+
-			"checklist to %s as GitHub-style markdown checkboxes, one task per line: \"- [ ] <task>\" - each description "+
-			"concrete enough that it's unambiguous when it's done. Include an initial task for any missing project "+
-			"scaffolding/toolchain setup, and a final task that verifies the whole thing end-to-end. "+progressLanguageRule+" "+
+		"Read %s and break its requirements down into an implementation checklist in %s. Be as detailed and granular "+
+			"as possible: prefer many small, independently verifiable tasks over a few broad ones - each task should be "+
+			"small enough to implement and verify in one focused sitting. Also look at the existing code in the working "+
+			"directory, if any - don't propose tasks for things already implemented, and account for what's already "+
+			"there.\n\n"+
+			"Structure %s like this:\n\n"+
+			"# <Project Title>\n\n"+
+			"## Phase 1: <Phase Name>\n\n"+
+			"- [ ] <concrete, unambiguous task description>\n"+
+			"- [ ] <another task>\n\n"+
+			"## Phase 2: <Phase Name>\n\n"+
+			"- [ ] <task>\n\n"+
+			"(and so on)\n\n"+
+			"Group related tasks under phase headings, ordered so each phase's dependencies come before it (adapt the "+
+			"actual phases to what the project needs - typically scaffolding/configuration first, then data/storage, "+
+			"then core logic, then API/integration, then UI, then testing and final verification last). Every task "+
+			"line must still be a GitHub-style checkbox \"- [ ] <task>\" - only those lines are tracked as tasks; phase "+
+			"headings and any other text are ignored. If %s labels requirements with IDs (e.g. REQ-012), reference the "+
+			"relevant ID(s) in parentheses at the end of each task description for traceability, e.g. \"- [ ] Do the "+
+			"thing (REQ-012)\" - only when such IDs actually appear in %s, never invent them. Include an initial phase "+
+			"covering any missing project scaffolding/toolchain setup, and a final phase with a task that verifies the "+
+			"whole thing end-to-end. "+progressLanguageRule+" "+
 			"Do not implement anything yet - only produce the task list.",
 		requirementsFile, progressFile, progressFile, requirementsFile, requirementsFile,
+		progressFile, requirementsFile, requirementsFile,
 	)
 }
 
@@ -237,9 +254,12 @@ func buildReconcilePrompt() string {
 			"the working directory, then update %s: add new unchecked tasks (\"- [ ] ...\") for anything new or changed that "+
 			"still needs work, and if a previously completed task (\"- [x]\") no longer matches the current requirement or "+
 			"the actual code, uncheck it back to \"- [ ]\" and adjust its description to reflect what's actually needed now. "+
-			"Leave unrelated existing tasks and their checked state as-is. "+progressLanguageRule+" "+
+			"Leave unrelated existing tasks and their checked state as-is. Keep new tasks as detailed and granular as the "+
+			"existing ones (small, independently verifiable, referencing requirement IDs in parentheses the same way the "+
+			"existing tasks do, if any), and organize them under the existing \"## Phase N: <name>\" heading they best "+
+			"fit, adding a new phase heading only if genuinely new work doesn't fit any existing phase. "+progressLanguageRule+" "+
 			"Do not implement anything yet - only update the task list.",
-		requirementsFile, progressFile, requirementsFile, progressFile, progressFile, progressFile, requirementsFile, requirementsFile,
+		requirementsFile, progressFile, progressFile, requirementsFile, progressFile, progressFile, requirementsFile, requirementsFile,
 	)
 }
 

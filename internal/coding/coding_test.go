@@ -181,6 +181,16 @@ func TestPlanGeneratesProgressWhenMissing(t *testing.T) {
 	if got := lastUserContent(p.sentReqs[0]); !strings.Contains(got, "existing code") {
 		t.Errorf("expected the generation prompt to check consistency with the existing codebase, got: %s", got)
 	}
+	if got := lastUserContent(p.sentReqs[0]); !strings.Contains(got, "detailed and granular") {
+		t.Errorf("expected the generation prompt to ask for maximum detail, got: %s", got)
+	}
+	if got := lastUserContent(p.sentReqs[0]); !strings.Contains(got, "## Phase 1: <Phase Name>") ||
+		!strings.Contains(got, "# <Project Title>") {
+		t.Errorf("expected the generation prompt to specify the phase-grouped checklist format, got: %s", got)
+	}
+	if got := lastUserContent(p.sentReqs[0]); !strings.Contains(got, "REQ-012") {
+		t.Errorf("expected the generation prompt to explain requirement-ID traceability, got: %s", got)
+	}
 
 	hash, err := os.ReadFile(filepath.Join(dir, hashFile))
 	if err != nil {
@@ -254,6 +264,12 @@ func TestPlanReconcilesWhenRequirementsChanged(t *testing.T) {
 	}
 	if got := lastUserContent(p.sentReqs[0]); !strings.Contains(got, "in English") {
 		t.Errorf("expected the reconcile prompt to instruct English task descriptions, got: %s", got)
+	}
+	if got := lastUserContent(p.sentReqs[0]); !strings.Contains(got, "detailed and granular") {
+		t.Errorf("expected the reconcile prompt to ask for the same level of detail as existing tasks, got: %s", got)
+	}
+	if got := lastUserContent(p.sentReqs[0]); !strings.Contains(got, "## Phase N: <name>") {
+		t.Errorf("expected the reconcile prompt to preserve the phase-grouped format, got: %s", got)
 	}
 
 	gotHash, err := os.ReadFile(filepath.Join(dir, hashFile))
