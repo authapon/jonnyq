@@ -667,7 +667,7 @@ func TestAutoRunGeneratesAndCompletesAllTasks(t *testing.T) {
 	}}
 	ag := newTestAgent(t, dir, p)
 
-	if err := AutoRun(context.Background(), ag, ag.UI, dir); err != nil {
+	if err := AutoRun(context.Background(), ag, ag.UI, dir, nil); err != nil {
 		t.Fatalf("AutoRun failed: %v", err)
 	}
 	if p.calls != 4 {
@@ -711,7 +711,7 @@ func TestAutoRunRetriesStuckTaskNeverTouchedWithDiagnosticNote(t *testing.T) {
 	}}
 	ag := newTestAgent(t, dir, p)
 
-	err := AutoRun(context.Background(), ag, ag.UI, dir)
+	err := AutoRun(context.Background(), ag, ag.UI, dir, nil)
 	if err == nil {
 		t.Fatal("expected an error once the stall limit is reached")
 	}
@@ -766,7 +766,7 @@ func TestAutoRunRetriesStuckTaskTouchedWithDiagnosticNote(t *testing.T) {
 	}}
 	ag := newTestAgent(t, dir, p)
 
-	err := AutoRun(context.Background(), ag, ag.UI, dir)
+	err := AutoRun(context.Background(), ag, ag.UI, dir, nil)
 	if err == nil {
 		t.Fatal("expected an error once the stall limit is reached")
 	}
@@ -802,7 +802,7 @@ func TestAutoRunResetsHistoryBeforeEachTask(t *testing.T) {
 	}}
 	ag := newTestAgent(t, dir, p)
 
-	if err := AutoRun(context.Background(), ag, ag.UI, dir); err != nil {
+	if err := AutoRun(context.Background(), ag, ag.UI, dir, nil); err != nil {
 		t.Fatalf("AutoRun failed: %v", err)
 	}
 	if p.calls != 6 {
@@ -868,7 +868,7 @@ func TestAutoRunAbortsOnNoOverallProgressEvenIfNextTaskTextKeepsChanging(t *test
 	p := &sequenceProvider{t: t, steps: steps}
 	ag := newTestAgent(t, dir, p)
 
-	err := AutoRun(context.Background(), ag, ag.UI, dir)
+	err := AutoRun(context.Background(), ag, ag.UI, dir, nil)
 	if err == nil {
 		t.Fatal("expected an error once the no-overall-progress limit is reached")
 	}
@@ -893,10 +893,91 @@ func TestAutoRunResetsCodingMode(t *testing.T) {
 	}}
 	ag := newTestAgent(t, dir, p)
 
-	if err := AutoRun(context.Background(), ag, ag.UI, dir); err != nil {
+	if err := AutoRun(context.Background(), ag, ag.UI, dir, nil); err != nil {
 		t.Fatalf("AutoRun failed: %v", err)
 	}
 	if ag.CodingMode {
 		t.Error("expected CodingMode to be reset to false after AutoRun returns")
+	}
+}
+
+// ---- failure notifications ----
+
+func TestPlanNotifiesOnError(t *testing.T) {
+	dir := t.TempDir() // no requirements.md
+	ag := newTestAgent(t, dir, &sequenceProvider{t: t})
+	capture := newCaptureNotify(t)
+
+	err := Plan(context.Background(), ag, ag.UI, dir, capture.notifier())
+	if err == nil {
+		t.Fatal("expected an error without requirements.md")
+	}
+	if !notify.IsNotified(err) {
+		t.Error("expected the returned error to be marked as already notified")
+	}
+	if capture.calls != 1 {
+		t.Fatalf("expected exactly 1 notification, got %d", capture.calls)
+	}
+	if !strings.Contains(capture.title, "/plan failed") {
+		t.Errorf("expected a failure title, got: %q", capture.title)
+	}
+	for _, want := range []string{"requirements.md not found", "Reason:", "Duration:"} {
+		if !strings.Contains(capture.body, want) {
+			t.Errorf("expected the body to contain %q, got: %q", want, capture.body)
+		}
+	}
+}
+
+func TestRunOneTaskNotifiesOnMissingProgress(t *testing.T) {
+	dir := t.TempDir()
+	ag := newTestAgent(t, dir, &sequenceProvider{t: t})
+	capture := newCaptureNotify(t)
+
+	if err := RunOneTask(context.Background(), ag, ag.UI, dir, capture.notifier()); err == nil {
+		t.Fatal("expected an error without .progress")
+	}
+	if capture.calls != 1 || !strings.Contains(capture.title, "/coding failed") || !strings.Contains(capture.body, "/plan") {
+		t.Errorf("unexpected notification: calls=%d title=%q body=%q", capture.calls, capture.title, capture.body)
+	}
+}
+
+func TestPlanDoesNotNotifyOnCancel(t *testing.T) {
+	dir := t.TempDir()
+	ag := newTestAgent(t, dir, &sequenceProvider{t: t})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := Plan(ctx, ag, ag.UI, dir, failIfCalledNotify(t))
+	if err == nil || notify.IsNotified(err) {
+		t.Errorf("expected a plain un-notified error, got: %v", err)
+	}
+}
+
+func TestAutoRunNotifiesWhenAborted(t *testing.T) {
+	dir := t.TempDir()
+	reqData := []byte("x")
+	if err := os.WriteFile(filepath.Join(dir, requirementsFile), reqData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, progressFile), []byte("- [ ] stuck\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStoredHash(filepath.Join(dir, hashFile), fileHash(reqData)); err != nil {
+		t.Fatal(err)
+	}
+	var steps []step
+	for i := 0; i < maxStallRounds+2; i++ {
+		steps = append(steps, contentStep("done"))
+	}
+	ag := newTestAgent(t, dir, &sequenceProvider{t: t, steps: steps})
+	capture := newCaptureNotify(t)
+
+	err := AutoRun(context.Background(), ag, ag.UI, dir, capture.notifier())
+	if err == nil {
+		t.Fatal("expected AutoRun to abort")
+	}
+	if capture.calls != 1 || !strings.Contains(capture.title, "/autocoding failed") ||
+		!strings.Contains(capture.body, "made no progress") || !strings.Contains(capture.body, "Reason:") {
+		t.Errorf("unexpected notification: calls=%d title=%q body=%q", capture.calls, capture.title, capture.body)
 	}
 }

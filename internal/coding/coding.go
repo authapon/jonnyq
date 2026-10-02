@@ -124,6 +124,28 @@ func notifyOrWarn(ctx context.Context, n *notify.Notifier, w *ui.Writer, title, 
 	}
 }
 
+// notifyFailure is deferred by Plan/RunOneTask/AutoRun (assigning its result
+// to the named return err): when the command is about to return a
+// non-nil error that wasn't caused by the user cancelling and hasn't
+// already been notified, it posts a failure notification (raw error, the
+// likely reason, and the same timing/stats footer as success
+// notifications) and marks the error as notified so the REPL doesn't send a
+// duplicate. A notification failure only prints a warning.
+func notifyFailure(ctx context.Context, n *notify.Notifier, w *ui.Writer, title string, start time.Time, err error) error {
+	if err == nil || !n.Enabled() || ctx.Err() != nil || notify.IsNotified(err) {
+		return err
+	}
+	// No LLM stats: an errored turn's usage is incomplete or stale.
+	end := time.Now()
+	footer := fmt.Sprintf("Started: %s\nFailed: %s\nDuration: %s",
+		start.Format(notifyTimestampLayout), end.Format(notifyTimestampLayout), end.Sub(start).Round(time.Millisecond))
+	if sendErr := n.SendError(ctx, title, err, footer); sendErr != nil {
+		w.Plainln("warning: ntfy notification failed: " + sendErr.Error())
+		return err
+	}
+	return notify.MarkNotified(err)
+}
+
 // notifyTimestampLayout matches the timezone-qualified format already used
 // for the "current date and time" line in the system message, so a
 // notification's timestamps read consistently with what the model itself
@@ -326,8 +348,9 @@ func buildTaskPrompt(taskText string, stall int, prevUntouched bool) string {
 // ntfy notifier to post a completion summary to when real work happened
 // (generating or reconciling) - pass nil/a disabled Notifier to skip
 // notifying, as AutoRun does for its own internal Plan call.
-func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) error {
+func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) (err error) {
 	start := time.Now()
+	defer func() { err = notifyFailure(ctx, n, w, "jonnyq: /plan failed", start, err) }()
 	reqPath := filepath.Join(workDir, requirementsFile)
 	reqData, err := os.ReadFile(reqPath)
 	if err != nil {
@@ -385,8 +408,9 @@ func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n 
 // n is the ntfy notifier to post a completion summary to (all tasks
 // already done, this task completed, or this task stalled out) - pass
 // nil/a disabled Notifier to skip notifying.
-func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) error {
+func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) (err error) {
 	start := time.Now()
+	defer func() { err = notifyFailure(ctx, n, w, "jonnyq: /coding failed", start, err) }()
 	progPath := filepath.Join(workDir, progressFile)
 	if _, err := os.Stat(progPath); err != nil {
 		return fmt.Errorf("%s not found; run /plan first to generate it from %s", progressFile, requirementsFile)
@@ -437,8 +461,15 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 				"Task %q made no progress after %d attempts; check %s and requirements.md manually. %s",
 				next.text, maxStallRounds, progressFile, progressSummaryLine(tasksAfter),
 			)
-			notifyOrWarn(ctx, n, w, "jonnyq: /coding stalled", withTiming(summary, start, time.Now(), ag.LastUsage))
-			return fmt.Errorf("task %q made no progress after %d attempts via /coding; check %s and requirements.md manually", next.text, maxStallRounds, progressFile)
+			stallErr := fmt.Errorf("task %q made no progress after %d attempts via /coding; check %s and requirements.md manually", next.text, maxStallRounds, progressFile)
+			if n.Enabled() {
+				msg := notify.FormatError(stallErr) + "\n\n" + withTiming(summary, start, time.Now(), ag.LastUsage)
+				if sendErr := n.SendAlert(ctx, "jonnyq: /coding stalled", msg); sendErr != nil {
+					w.Plainln("warning: ntfy notification failed: " + sendErr.Error())
+				}
+				return notify.MarkNotified(stallErr)
+			}
+			return stallErr
 		}
 		untouched := progressUnchanged(progPath, before)
 		if err := writeRetryState(retryPath, retryState{text: next.text, count: newCount, untouched: untouched}); err != nil {
@@ -455,9 +486,12 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 // AutoRun is /autocoding: the original /coding behavior, kept under a new
 // name. It plans (as Plan does) if needed, then works through every
 // unfinished task in .progress in one run instead of stopping after each.
-// It never sends ntfy notifications itself (only /plan and /coding do) -
-// its internal Plan call passes a disabled notifier accordingly.
-func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string) error {
+// It doesn't notify on success (its internal Plan call passes a disabled
+// notifier, otherwise every task would ping), but if n is enabled it does
+// notify when the run aborts with an error, with the reason.
+func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) (err error) {
+	start := time.Now()
+	defer func() { err = notifyFailure(ctx, n, w, "jonnyq: /autocoding failed", start, err) }()
 	if err := Plan(ctx, ag, w, workDir, nil); err != nil {
 		return err
 	}

@@ -36,7 +36,7 @@ const helpText = `Slash commands:
   /coding                           work on the next unfinished task in .progress, then stop (Ctrl-C cancels)
   /autocoding                       plan if needed, then work through every task in .progress in one run (Ctrl-C cancels)
   /watchfile [<word>|off]           watch the working directory for a magic word (default "AI!") and act on it when found
-  /ntfy [<topic url>|off]           set/clear the ntfy.sh topic URL for /plan and /coding completion notifications
+  /ntfy [<topic url>|off]           set/clear the ntfy.sh topic URL for /plan and /coding completion notifications and error alerts
   /toolmode [native|prompt]         switch how tools are called: native tool-calling (default) or a plain-text fenced JSON block for models with unreliable native tool-calling
   /exit  /bye                       exit jonnyq
 
@@ -181,9 +181,27 @@ func (r *REPL) runCancellable(ctx context.Context, fn func(context.Context) (exi
 			r.UI.Meta("[cancelled]")
 		} else {
 			r.UI.Plainln("error: " + err.Error())
+			r.notifyError(ctx, err)
 		}
 	}
 	return exit
+}
+
+// notifyError posts an ntfy failure notification (error + likely reason)
+// for an error that runCancellable just reported, unless notifications are
+// off or /plan, /coding or /autocoding already sent a more detailed one.
+// A failure to notify is only a warning.
+func (r *REPL) notifyError(ctx context.Context, err error) {
+	if notify.IsNotified(err) {
+		return
+	}
+	n := notify.New(r.Cfg.NtfyURL)
+	if !n.Enabled() {
+		return
+	}
+	if sendErr := n.SendError(ctx, "jonnyq: error", err, ""); sendErr != nil {
+		r.UI.Plainln("warning: ntfy notification failed: " + sendErr.Error())
+	}
 }
 
 func (r *REPL) watcherMagicWord() string {
@@ -319,7 +337,7 @@ func (r *REPL) handleSlash(ctx context.Context, line string, watchTriggers chan<
 			r.UI.Plainln("no model set; use /model <name> first")
 			return false, nil
 		}
-		return false, coding.AutoRun(ctx, r.Agent, r.UI, ".")
+		return false, coding.AutoRun(ctx, r.Agent, r.UI, ".", notify.New(r.Cfg.NtfyURL))
 
 	case "/watchfile":
 		r.toggleWatch(rest, watchTriggers)
