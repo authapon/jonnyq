@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestWriter(t *testing.T) (*Writer, string) {
@@ -141,6 +142,54 @@ func TestContextStatusFormattingAndColors(t *testing.T) {
 	for _, c := range cases {
 		if got := (ContextStatus{Used: c.used, Total: 100}).Color(); got != c.want {
 			t.Errorf("used=%d: color %q, want %q", c.used, got, c.want)
+		}
+	}
+}
+
+func TestSectionHeaderShowsElapsedAndRequestStats(t *testing.T) {
+	w, path := newTestWriter(t)
+	w.ContextFn = func() ContextStatus { return ContextStatus{Used: 100, Total: 1000} }
+	req := &RequestStats{PromptTokens: 1420, CompletionTokens: 380, TokPerSec: 22.4, Duration: 17 * time.Second}
+	stats := TurnStats{Elapsed: 25100 * time.Millisecond}
+	w.TurnStatsFn = func() (TurnStats, bool) { return stats, true }
+
+	w.Thinking("a") // no request finished yet
+	stats.Req = req
+	w.Answer("b")
+	w.ToolCall("c()")
+	log := readLog(t, path)
+
+	if !regexp.MustCompile(`Thinking ` + timestamp + ` \| ctx 100/1,000 \(10%\) left 900 \| \+25\.1s\n`).MatchString(log) {
+		t.Errorf("expected elapsed only on the first header, got: %q", log)
+	}
+	if !regexp.MustCompile(`Answer ` + timestamp + ` \| ctx [^|]*\| \+25\.1s \| last req 1,420 in/380 out, 22\.4 tok/s, 17\.0s\n`).MatchString(log) {
+		t.Errorf("expected 'last req' stats on the Answer header, got: %q", log)
+	}
+	if !strings.Contains(log, "| +25.1s | req 1,420 in/380 out, 22.4 tok/s, 17.0s\n") {
+		t.Errorf("expected 'req' stats on the Tool call header, got: %q", log)
+	}
+}
+
+func TestSectionHeaderOmitsStatsOutsideATurn(t *testing.T) {
+	w, path := newTestWriter(t)
+	w.TurnStatsFn = func() (TurnStats, bool) { return TurnStats{}, false }
+	w.Answer("x")
+	if strings.Contains(readLog(t, path), "+") {
+		t.Errorf("expected no elapsed readout when no turn is running")
+	}
+}
+
+func TestRequestStatsFormatting(t *testing.T) {
+	cases := []struct {
+		rs   RequestStats
+		want string
+	}{
+		{RequestStats{}, "n/a in/n/a out, n/a tok/s, 0.0s"},
+		{RequestStats{PromptTokens: 12, CompletionTokens: 3000, CompletionEstimated: true, TokPerSec: 8.55, TokPerSecEstimated: true, Duration: 65 * time.Second}, "12 in/~3,000 out, ~8.6 tok/s, 1m5s"},
+	}
+	for _, c := range cases {
+		if got := c.rs.String(); got != c.want {
+			t.Errorf("got %q, want %q", got, c.want)
 		}
 	}
 }

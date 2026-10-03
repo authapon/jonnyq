@@ -567,3 +567,54 @@ func TestRunTurnShowsContextInHeadersAndMetrics(t *testing.T) {
 		t.Errorf("expected exact end-of-turn ctx readout, got: %s", log)
 	}
 }
+
+func TestRunTurnHeadersShowElapsedAndLatestRequest(t *testing.T) {
+	responses := [][]llm.ChatEvent{
+		{
+			{Kind: llm.EventToolCalls, ToolCalls: []llm.ToolCall{{ID: "c1", Name: "echo", Arguments: `{"text":"hi"}`}}},
+			{Kind: llm.EventDone, Usage: llm.Usage{
+				PromptTokens: 1420, CompletionTokens: 380, TotalTokens: 1800,
+				EvalDuration: 10 * time.Second, HasTiming: true,
+			}},
+		},
+		{
+			{Kind: llm.EventContent, Delta: "done"},
+			{Kind: llm.EventDone, Usage: llm.Usage{PromptTokens: 1900, CompletionTokens: 20, TotalTokens: 1920}},
+		},
+	}
+	a, _, outFile := newTestAgent(t, responses)
+	if err := a.RunTurn(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(outFile)
+	log := string(data)
+	// The Tool call header follows the request that issued the call (real
+	// usage: 380 tokens over 10s of eval = 38.0 tok/s).
+	toolRe := regexp.MustCompile(`Tool call \([^)]*\) \| ctx [^|]*\| \+\d+\.\ds \| req 1,420 in/380 out, 38\.0 tok/s, \d+\.\ds\n`)
+	if !toolRe.MatchString(log) {
+		t.Errorf("expected req stats on the Tool call header, got: %s", log)
+	}
+	// The next Answer header only knows the previous request.
+	ansRe := regexp.MustCompile(`Answer \([^)]*\) \| ctx [^|]*\| \+\d+\.\ds \| last req 1,420 in/380 out, 38\.0 tok/s, \d+\.\ds\n`)
+	if !ansRe.MatchString(log) {
+		t.Errorf("expected last-req stats on the Answer header, got: %s", log)
+	}
+}
+
+func TestRunTurnFirstHeaderHasNoRequestStatsAndStatsClearAfterTurn(t *testing.T) {
+	responses := [][]llm.ChatEvent{{
+		{Kind: llm.EventContent, Delta: "hi"},
+		{Kind: llm.EventDone, Usage: llm.Usage{PromptTokens: 5, CompletionTokens: 1, TotalTokens: 6}},
+	}}
+	a, _, outFile := newTestAgent(t, responses)
+	if err := a.RunTurn(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(outFile)
+	if strings.Contains(string(data), " req ") {
+		t.Errorf("first header of a turn must not show request stats, got: %s", data)
+	}
+	if _, ok := a.turnStats(); ok {
+		t.Error("turn stats should be unavailable once the turn has ended")
+	}
+}

@@ -122,6 +122,12 @@ type Agent struct {
 	realPromptTokens int
 	realBaseChars    int
 	sysChars         int
+
+	// turnStart and lastReq feed the elapsed-time / latest-request part of
+	// section headers (see ui.Writer.TurnStatsFn). lastReq is cleared when a
+	// turn starts and set whenever an LLM request completes.
+	turnStart time.Time
+	lastReq   *ui.RequestStats
 }
 
 // decisiveThinkingPrompt is included in every system message, regardless of
@@ -168,6 +174,7 @@ func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool
 	// Section headers (Thinking / Tool call / Answer) show live context use.
 	if w != nil {
 		w.ContextFn = ag.ContextStatus
+		w.TurnStatsFn = ag.turnStats
 	}
 	return ag
 }
@@ -201,6 +208,31 @@ func (a *Agent) ContextStatus() ui.ContextStatus {
 	}
 	cs.Used = chars / approxCharsPerToken
 	return cs
+}
+
+// turnStats reports the running turn's elapsed time and latest finished
+// request, for section headers. False outside a turn.
+func (a *Agent) turnStats() (ui.TurnStats, bool) {
+	if a.turnStart.IsZero() {
+		return ui.TurnStats{}, false
+	}
+	return ui.TurnStats{Elapsed: time.Since(a.turnStart), Req: a.lastReq}, true
+}
+
+// requestStats condenses a finished request's usage and wall time into the
+// figures section headers show. tok/s follows FormatUsage's rule.
+func requestStats(u llm.Usage, wall time.Duration) *ui.RequestStats {
+	rs := &ui.RequestStats{
+		PromptTokens:        u.PromptTokens,
+		CompletionTokens:    u.CompletionTokens,
+		CompletionEstimated: u.CompletionEstimated,
+		Duration:            wall,
+	}
+	if u.HasTiming && u.EvalDuration > 0 && u.CompletionTokens > 0 {
+		rs.TokPerSec = float64(u.CompletionTokens) / u.EvalDuration.Seconds()
+		rs.TokPerSecEstimated = u.Estimated || u.CompletionEstimated
+	}
+	return rs
 }
 
 // finalContextStatus is the context size after a turn: the last request's
@@ -283,6 +315,9 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 	a.UI.NewTurn()
 	systemMsg := a.buildSystemMessage()
 	a.sysChars = len(systemMsg.Content)
+	a.turnStart = start
+	a.lastReq = nil
+	defer func() { a.turnStart = time.Time{} }()
 	a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: userInput})
 
 	maxToolCalls := a.MaxToolCallsPerTurn
@@ -297,6 +332,7 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 	for {
 		messages := append([]llm.Message{systemMsg}, a.History...)
 		roundBaseChars := a.sysChars + a.historyChars()
+		roundStart := time.Now()
 
 		// Each Chat call gets its own cancellable context so a detected
 		// repetition loop can abort just that in-flight request without
@@ -366,6 +402,7 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 			case llm.EventDone:
 				roundUsage = ev.Usage
 				gotDone = true
+				a.lastReq = requestStats(ev.Usage, time.Since(roundStart))
 				if ev.Usage.PromptTokens > 0 {
 					a.realPromptTokens = ev.Usage.PromptTokens
 					a.realBaseChars = roundBaseChars

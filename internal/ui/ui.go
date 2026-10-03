@@ -99,6 +99,55 @@ func (c ContextStatus) String() string {
 		tilde, groupDigits(c.Used), groupDigits(c.Total), tilde, c.Percent(), tilde, groupDigits(c.Left()))
 }
 
+// RequestStats summarizes one finished LLM request for section headers.
+// Zero token/tok-per-sec values mean "unknown" and render as n/a.
+type RequestStats struct {
+	PromptTokens        int
+	CompletionTokens    int
+	CompletionEstimated bool
+	TokPerSec           float64
+	TokPerSecEstimated  bool
+	Duration            time.Duration
+}
+
+// String renders e.g. "1,420 in/380 out, 22.4 tok/s, 17.0s", with "~" before
+// estimated figures.
+func (r RequestStats) String() string {
+	in, out, tps := "n/a", "n/a", "n/a"
+	if r.PromptTokens > 0 {
+		in = groupDigits(r.PromptTokens)
+	}
+	if r.CompletionTokens > 0 {
+		out = groupDigits(r.CompletionTokens)
+		if r.CompletionEstimated {
+			out = "~" + out
+		}
+	}
+	if r.TokPerSec > 0 {
+		tps = fmt.Sprintf("%.1f", r.TokPerSec)
+		if r.TokPerSecEstimated {
+			tps = "~" + tps
+		}
+	}
+	return fmt.Sprintf("%s in/%s out, %s tok/s, %s", in, out, tps, formatElapsed(r.Duration))
+}
+
+// TurnStats is what section headers show beyond context usage: time since
+// the turn started and, once one has finished, the latest LLM request.
+type TurnStats struct {
+	Elapsed time.Duration
+	Req     *RequestStats // nil until a request has finished in this turn
+}
+
+// formatElapsed renders d as tenths of a second under a minute, else rounded
+// to whole seconds (e.g. "17.0s", "1m5s").
+func formatElapsed(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	return d.Round(time.Second).String()
+}
+
 // groupDigits formats n with thousands separators.
 func groupDigits(n int) string {
 	s := strconv.Itoa(n)
@@ -130,6 +179,15 @@ type Writer struct {
 	// ContextFn, when set, supplies the current context usage that section
 	// headers show after their timestamp. Nil leaves headers unchanged.
 	ContextFn func() ContextStatus
+
+	// TurnStatsFn, when set, supplies the elapsed-time and latest-request
+	// figures appended after the context readout. It reports false when no
+	// turn is running. The request shown is labeled "req" on a Tool call
+	// header (printed right after that request finished, so it is the one
+	// that produced the call) and "last req" on Thinking/Answer headers
+	// (printed while the current request is still starting, so it is the
+	// previous one).
+	TurnStatsFn func() (TurnStats, bool)
 }
 
 func New(outputFile string) (*Writer, error) {
@@ -194,6 +252,18 @@ func (w *Writer) startSection(s section, bright, label string) {
 	if w.ContextFn != nil {
 		cs := w.ContextFn()
 		ctxText, ctxColor = " | "+cs.String(), cs.Color()
+	}
+	if w.TurnStatsFn != nil {
+		if ts, ok := w.TurnStatsFn(); ok {
+			ctxText += " | +" + formatElapsed(ts.Elapsed)
+			if ts.Req != nil {
+				label := "last req"
+				if s == sectionTool {
+					label = "req"
+				}
+				ctxText += " | " + label + " " + ts.Req.String()
+			}
+		}
 	}
 	if w.colorOut {
 		fmt.Fprint(w.out, ColorBold, bright, stamped, ColorReset)
