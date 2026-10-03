@@ -337,7 +337,7 @@ func TestPlanNotifiesOnGenerate(t *testing.T) {
 	if !strings.Contains(capture.body, "token_in=500") || !strings.Contains(capture.body, "token_out=120") || !strings.Contains(capture.body, "total_token=620") {
 		t.Errorf("expected the notification body to include the real token stats, got: %q", capture.body)
 	}
-	if !strings.Contains(capture.body, "preload=200ms") || !strings.Contains(capture.body, "prompt_eval=80ms") || !strings.Contains(capture.body, "thinking=4s") {
+	if !strings.Contains(capture.body, "preload=200ms") || !strings.Contains(capture.body, "prompt_eval=80ms") || !strings.Contains(capture.body, "generate=4s") {
 		t.Errorf("expected the notification body to include the real timing stats, got: %q", capture.body)
 	}
 }

@@ -10,12 +10,56 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
+// approxCharsPerToken is used only to estimate completion tokens when the
+// endpoint sends no usage block.
+const approxCharsPerToken = 4
+
+// streamTimer measures generation timing client-side: the time from the
+// request to the first streamed token, and from the first to the last
+// streamed token, plus how much text arrived (for a token estimate).
+type streamTimer struct {
+	start, first, last time.Time
+	chars              int
+}
+
+// mark records a streamed delta carrying n characters of output.
+func (t *streamTimer) mark(n int) {
+	if n <= 0 {
+		return
+	}
+	now := time.Now()
+	if t.first.IsZero() {
+		t.first = now
+	}
+	t.last = now
+	t.chars += n
+}
+
+// apply fills u's timing (and, if the endpoint reported no completion
+// tokens, an estimate of them) from what was measured. u is left untouched
+// if nothing was streamed.
+func (t *streamTimer) apply(u Usage) Usage {
+	if t.first.IsZero() {
+		return u
+	}
+	u.HasTiming = true
+	u.Estimated = true
+	u.PromptEvalDuration = t.first.Sub(t.start)
+	u.EvalDuration = t.last.Sub(t.first)
+	if u.CompletionTokens == 0 {
+		u.CompletionTokens = (t.chars + approxCharsPerToken - 1) / approxCharsPerToken
+		u.CompletionEstimated = true
+	}
+	return u
+}
+
 // OpenAIProvider talks to any OpenAI-compatible /v1/chat/completions endpoint
-// over SSE. Unlike Ollama, these endpoints do not generally expose
-// load/prompt-eval/eval timing breakdowns, so Usage.HasTiming stays false and
-// callers should render those fields as unavailable rather than guessing.
+// over SSE. Unlike Ollama, these endpoints only report token counts, not
+// load/prompt-eval/eval timings, so Chat measures timing client-side while
+// streaming and flags it as Usage.Estimated.
 type OpenAIProvider struct {
 	BaseURL string
 	Key     string
@@ -168,6 +212,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (<-chan Chat
 		return nil, err
 	}
 	httpReq.Header.Set("Accept", "text/event-stream")
+	timer := &streamTimer{start: time.Now()}
 	resp, err := p.HTTP.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -216,7 +261,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (<-chan Chat
 			}
 			if payload == "[DONE]" {
 				flushToolCalls()
-				out <- ChatEvent{Kind: EventDone, Usage: usage}
+				out <- ChatEvent{Kind: EventDone, Usage: timer.apply(usage)}
 				return
 			}
 			var chunk oaChunk
@@ -230,6 +275,11 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (<-chan Chat
 				usage.TotalTokens = chunk.Usage.TotalTokens
 			}
 			for _, choice := range chunk.Choices {
+				n := len(choice.Delta.ReasoningContent) + len(choice.Delta.Content)
+				for _, tc := range choice.Delta.ToolCalls {
+					n += len(tc.Function.Name) + len(tc.Function.Arguments)
+				}
+				timer.mark(n)
 				if choice.Delta.ReasoningContent != "" {
 					out <- ChatEvent{Kind: EventThinking, Delta: choice.Delta.ReasoningContent}
 				}
@@ -262,7 +312,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (<-chan Chat
 			return
 		}
 		flushToolCalls()
-		out <- ChatEvent{Kind: EventDone, Usage: usage}
+		out <- ChatEvent{Kind: EventDone, Usage: timer.apply(usage)}
 	}()
 	return out, nil
 }

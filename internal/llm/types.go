@@ -41,10 +41,12 @@ type ToolSpec struct {
 	Parameters  map[string]any
 }
 
-// Usage carries token counts and, when the provider reports them, timing
-// breakdowns. HasTiming is false for providers (e.g. hosted OpenAI-compatible
-// endpoints) that do not expose load/eval timings, so callers can render
-// "n/a" instead of a fabricated number.
+// Usage carries token counts and, when available, timing breakdowns.
+// HasTiming is false when no timing exists at all, so callers can render
+// "n/a" instead of a fabricated number. Timing is either reported by the
+// provider (Ollama) or measured client-side while streaming (OpenAI-compatible
+// endpoints, which only report token counts); Estimated marks the latter so it
+// can be shown as approximate.
 type Usage struct {
 	PromptTokens       int
 	CompletionTokens   int
@@ -53,6 +55,15 @@ type Usage struct {
 	PromptEvalDuration time.Duration
 	EvalDuration       time.Duration
 	HasTiming          bool
+	// Estimated is true when the timings were measured by the client rather
+	// than reported by the provider: PromptEvalDuration is then the time to
+	// the first streamed token (load + prompt eval + network, not separable),
+	// LoadDuration is unavailable, and EvalDuration is first-to-last token
+	// time as seen by the client.
+	Estimated bool
+	// CompletionEstimated is true when CompletionTokens was approximated from
+	// the streamed text because the provider sent no usage block.
+	CompletionEstimated bool
 }
 
 // ChatRequest is one call to Chat.

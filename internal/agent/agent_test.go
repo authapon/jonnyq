@@ -255,7 +255,7 @@ func TestFormatUsageMatchesTerminalMetricsLine(t *testing.T) {
 		HasTiming: true,
 	}
 	got := FormatUsage(u)
-	want := "preload=1.2s prompt_eval=300ms thinking=2s token_in=100 token_out=50 total_token=150 tok/s=25.00"
+	want := "preload=1.2s prompt_eval=300ms generate=2s token_in=100 token_out=50 total_token=150 tok/s=25.00"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -263,7 +263,7 @@ func TestFormatUsageMatchesTerminalMetricsLine(t *testing.T) {
 
 func TestFormatUsageHandlesMissingTimingAndTokens(t *testing.T) {
 	got := FormatUsage(llm.Usage{})
-	want := "preload=n/a prompt_eval=n/a thinking=n/a token_in=n/a token_out=n/a total_token=n/a tok/s=n/a"
+	want := "preload=n/a prompt_eval=n/a generate=n/a token_in=n/a token_out=n/a total_token=n/a tok/s=n/a"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -472,5 +472,36 @@ func TestSystemMessageOmitsOutputFileNoteWhenUnset(t *testing.T) {
 	msg := a.buildSystemMessage()
 	if strings.Contains(msg.Content, "Ignore ") {
 		t.Errorf("expected no output-file note when OutputFile is unset, got: %s", msg.Content)
+	}
+}
+
+func TestFormatUsageMarksClientMeasuredFiguresAsApproximate(t *testing.T) {
+	u := llm.Usage{
+		PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150,
+		PromptEvalDuration: 300 * time.Millisecond, EvalDuration: 2 * time.Second,
+		HasTiming: true, Estimated: true,
+	}
+	want := "preload=n/a prompt_eval=~300ms generate=~2s token_in=100 token_out=50 total_token=150 tok/s=~25.00"
+	if got := FormatUsage(u); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFormatUsageEstimatedCompletionTokensWithoutUsageBlock(t *testing.T) {
+	u := llm.Usage{
+		CompletionTokens: 40, CompletionEstimated: true,
+		PromptEvalDuration: time.Second, EvalDuration: 2 * time.Second,
+		HasTiming: true, Estimated: true,
+	}
+	want := "preload=n/a prompt_eval=~1s generate=~2s token_in=n/a token_out=~40 total_token=n/a tok/s=~20.00"
+	if got := FormatUsage(u); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSumUsageKeepsEstimatedFlags(t *testing.T) {
+	got := sumUsage(llm.Usage{HasTiming: true}, llm.Usage{HasTiming: true, Estimated: true, CompletionEstimated: true})
+	if !got.Estimated || !got.CompletionEstimated {
+		t.Errorf("expected estimated flags to survive summing, got %+v", got)
 	}
 }

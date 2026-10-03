@@ -200,13 +200,15 @@ func (a *Agent) buildSystemMessage() llm.Message {
 
 func sumUsage(a, b llm.Usage) llm.Usage {
 	return llm.Usage{
-		PromptTokens:       a.PromptTokens + b.PromptTokens,
-		CompletionTokens:   a.CompletionTokens + b.CompletionTokens,
-		TotalTokens:        a.TotalTokens + b.TotalTokens,
-		LoadDuration:       a.LoadDuration + b.LoadDuration,
-		PromptEvalDuration: a.PromptEvalDuration + b.PromptEvalDuration,
-		EvalDuration:       a.EvalDuration + b.EvalDuration,
-		HasTiming:          a.HasTiming || b.HasTiming,
+		PromptTokens:        a.PromptTokens + b.PromptTokens,
+		CompletionTokens:    a.CompletionTokens + b.CompletionTokens,
+		TotalTokens:         a.TotalTokens + b.TotalTokens,
+		LoadDuration:        a.LoadDuration + b.LoadDuration,
+		PromptEvalDuration:  a.PromptEvalDuration + b.PromptEvalDuration,
+		EvalDuration:        a.EvalDuration + b.EvalDuration,
+		HasTiming:           a.HasTiming || b.HasTiming,
+		Estimated:           a.Estimated || b.Estimated,
+		CompletionEstimated: a.CompletionEstimated || b.CompletionEstimated,
 	}
 }
 
@@ -451,30 +453,49 @@ func (a *Agent) printMetrics(u llm.Usage, wallClock time.Duration) {
 }
 
 // FormatUsage renders u's timing/token figures the same way the terminal's
-// end-of-turn metrics line does (preload/prompt_eval/thinking durations,
+// end-of-turn metrics line does (preload/prompt_eval/generate durations,
 // token in/out/total, tokens/sec) - exported for reuse anywhere the same
 // stats need reporting outside the UI, e.g. /plan and /coding's ntfy
 // notifications.
+//
+// "generate" is the whole generation time (reasoning plus the answer), not
+// just the thinking phase. Figures the client measured itself rather than
+// the provider reporting (u.Estimated) are prefixed with "~", and preload
+// is "n/a" because load time can't be separated from prompt eval there
+// (prompt_eval is then the time to the first token).
 func FormatUsage(u llm.Usage) string {
 	fmtDur := func(d time.Duration) string {
 		if !u.HasTiming {
 			return "n/a"
 		}
-		return d.Round(time.Millisecond).String()
+		s := d.Round(time.Millisecond).String()
+		if u.Estimated {
+			s = "~" + s
+		}
+		return s
+	}
+	preload := fmtDur(u.LoadDuration)
+	if u.Estimated {
+		preload = "n/a"
 	}
 	tokIn, tokOut, tokTotal := "n/a", "n/a", "n/a"
 	if u.TotalTokens > 0 {
 		tokIn = strconv.Itoa(u.PromptTokens)
 		tokOut = strconv.Itoa(u.CompletionTokens)
 		tokTotal = strconv.Itoa(u.TotalTokens)
+	} else if u.CompletionEstimated && u.CompletionTokens > 0 {
+		tokOut = "~" + strconv.Itoa(u.CompletionTokens)
 	}
 	tps := "n/a"
 	if u.HasTiming && u.EvalDuration > 0 && u.CompletionTokens > 0 {
 		tps = fmt.Sprintf("%.2f", float64(u.CompletionTokens)/u.EvalDuration.Seconds())
+		if u.Estimated || u.CompletionEstimated {
+			tps = "~" + tps
+		}
 	}
 	return fmt.Sprintf(
-		"preload=%s prompt_eval=%s thinking=%s token_in=%s token_out=%s total_token=%s tok/s=%s",
-		fmtDur(u.LoadDuration), fmtDur(u.PromptEvalDuration), fmtDur(u.EvalDuration),
+		"preload=%s prompt_eval=%s generate=%s token_in=%s token_out=%s total_token=%s tok/s=%s",
+		preload, fmtDur(u.PromptEvalDuration), fmtDur(u.EvalDuration),
 		tokIn, tokOut, tokTotal, tps,
 	)
 }

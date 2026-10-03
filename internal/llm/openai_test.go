@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func writeSSE(w http.ResponseWriter, payload string) {
@@ -49,8 +50,11 @@ func TestOpenAIChatStreamsContentAndUsage(t *testing.T) {
 	if content != "Hello" {
 		t.Errorf("expected 'Hello', got %q", content)
 	}
-	if usage.HasTiming {
-		t.Errorf("openai usage should not report native timing")
+	if !usage.HasTiming || !usage.Estimated {
+		t.Errorf("openai usage should carry client-measured (estimated) timing, got %+v", usage)
+	}
+	if usage.CompletionEstimated {
+		t.Errorf("completion tokens came from the usage block and must not be flagged estimated")
 	}
 	if usage.PromptTokens != 10 || usage.CompletionTokens != 3 || usage.TotalTokens != 13 {
 		t.Errorf("unexpected usage: %+v", usage)
@@ -123,5 +127,61 @@ func TestOpenAIChatAccumulatesToolCallArguments(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0].Name != "read_file" || calls[0].Arguments != `{"path":"a.txt"}` {
 		t.Errorf("unexpected accumulated tool call: %+v", calls)
+	}
+}
+
+func TestOpenAIMeasuresTimingClientSide(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(60 * time.Millisecond) // "prompt processing" before the first token
+		writeSSE(w, `{"choices":[{"delta":{"content":"Hello"}}]}`)
+		w.(http.Flusher).Flush()
+		time.Sleep(80 * time.Millisecond) // "generation"
+		writeSSE(w, `{"choices":[{"delta":{"content":" world"},"finish_reason":"stop"}]}`)
+		writeSSE(w, "[DONE]")
+	}))
+	defer srv.Close()
+
+	events, err := NewOpenAIProvider(srv.URL, "").Chat(context.Background(), ChatRequest{Model: "m", Messages: []Message{{Role: RoleUser, Content: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usage Usage
+	for ev := range events {
+		if ev.Kind == EventDone {
+			usage = ev.Usage
+		}
+	}
+	if !usage.HasTiming || !usage.Estimated {
+		t.Fatalf("expected estimated timing, got %+v", usage)
+	}
+	if usage.PromptEvalDuration < 50*time.Millisecond {
+		t.Errorf("expected time-to-first-token >= ~60ms, got %s", usage.PromptEvalDuration)
+	}
+	if usage.EvalDuration < 70*time.Millisecond {
+		t.Errorf("expected generation time >= ~80ms, got %s", usage.EvalDuration)
+	}
+	if usage.LoadDuration != 0 {
+		t.Errorf("load time cannot be measured client-side, got %s", usage.LoadDuration)
+	}
+	// No usage block was sent: tokens are estimated from the 11 streamed chars.
+	if !usage.CompletionEstimated || usage.CompletionTokens != 3 {
+		t.Errorf("expected 3 estimated completion tokens, got %+v", usage)
+	}
+}
+
+func TestOpenAINoTimingWhenNothingStreamed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, "[DONE]")
+	}))
+	defer srv.Close()
+
+	events, err := NewOpenAIProvider(srv.URL, "").Chat(context.Background(), ChatRequest{Model: "m", Messages: []Message{{Role: RoleUser, Content: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for ev := range events {
+		if ev.Kind == EventDone && (ev.Usage.HasTiming || ev.Usage.Estimated) {
+			t.Errorf("expected no timing when no token streamed, got %+v", ev.Usage)
+		}
 	}
 }
