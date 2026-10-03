@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -43,6 +44,77 @@ const (
 	sectionTool
 )
 
+// Context usage thresholds (percent of the context window) for coloring.
+// ContextWarnPercent mirrors the point at which the agent compacts history.
+const (
+	ContextWarnPercent     = 60
+	ContextCriticalPercent = 85
+)
+
+// ContextStatus is how much of the model's context window is in use.
+// Estimated is true when Used was partly or wholly approximated from text
+// length instead of a token count reported by the provider.
+type ContextStatus struct {
+	Used      int
+	Total     int
+	Estimated bool
+}
+
+// Left is the remaining tokens, never negative.
+func (c ContextStatus) Left() int {
+	if c.Used >= c.Total {
+		return 0
+	}
+	return c.Total - c.Used
+}
+
+// Percent is Used as a whole percentage of Total (0 when Total is unset).
+func (c ContextStatus) Percent() int {
+	if c.Total <= 0 {
+		return 0
+	}
+	return c.Used * 100 / c.Total
+}
+
+// Color is gray normally, yellow once usage reaches ContextWarnPercent
+// (compaction is near) and red from ContextCriticalPercent.
+func (c ContextStatus) Color() string {
+	switch p := c.Percent(); {
+	case p >= ContextCriticalPercent:
+		return ColorRed
+	case p >= ContextWarnPercent:
+		return ColorYellow
+	}
+	return ColorGray
+}
+
+// String renders e.g. "ctx 6,300/16,348 (38%) left 10,048", with "~" before
+// the figures that are estimates.
+func (c ContextStatus) String() string {
+	tilde := ""
+	if c.Estimated {
+		tilde = "~"
+	}
+	return fmt.Sprintf("ctx %s%s/%s (%s%d%%) left %s%s",
+		tilde, groupDigits(c.Used), groupDigits(c.Total), tilde, c.Percent(), tilde, groupDigits(c.Left()))
+}
+
+// groupDigits formats n with thousands separators.
+func groupDigits(n int) string {
+	s := strconv.Itoa(n)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s
+}
+
 // Writer prints colored text to stdout (when stdout is a terminal) and
 // always appends the plain-text equivalent to a log file.
 type Writer struct {
@@ -54,6 +126,10 @@ type Writer struct {
 	// nothing has been written yet), so startSection knows whether it needs
 	// to terminate the current line before inserting a blank separator one.
 	atLineStart bool
+
+	// ContextFn, when set, supplies the current context usage that section
+	// headers show after their timestamp. Nil leaves headers unchanged.
+	ContextFn func() ContextStatus
 }
 
 func New(outputFile string) (*Writer, error) {
@@ -114,12 +190,21 @@ func (w *Writer) startSection(s section, bright, label string) {
 	}
 	w.Plain("\n")
 	stamped := fmt.Sprintf("%s (%s)", label, time.Now().Format("2006-01-02 15:04:05"))
-	if w.colorOut {
-		fmt.Fprint(w.out, ColorBold, bright, stamped, ColorReset, "\n")
-	} else {
-		fmt.Fprint(w.out, stamped, "\n")
+	ctxText, ctxColor := "", ColorGray
+	if w.ContextFn != nil {
+		cs := w.ContextFn()
+		ctxText, ctxColor = " | "+cs.String(), cs.Color()
 	}
-	fmt.Fprint(w.log, stamped, "\n")
+	if w.colorOut {
+		fmt.Fprint(w.out, ColorBold, bright, stamped, ColorReset)
+		if ctxText != "" {
+			fmt.Fprint(w.out, ctxColor, ctxText, ColorReset)
+		}
+		fmt.Fprint(w.out, "\n")
+	} else {
+		fmt.Fprint(w.out, stamped, ctxText, "\n")
+	}
+	fmt.Fprint(w.log, stamped, ctxText, "\n")
 	w.atLineStart = true
 }
 
@@ -145,6 +230,9 @@ func (w *Writer) ToolCall(text string) {
 }
 
 func (w *Writer) Meta(text string) { w.Println(ColorGray, text) }
+
+// MetaColored is Meta in a caller-chosen color (e.g. a context warning).
+func (w *Writer) MetaColored(color, text string) { w.Println(color, text) }
 
 // Plain writes uncolored text to stdout and the log (for prompts, errors,
 // help text, etc. that shouldn't carry one of the semantic colors above).

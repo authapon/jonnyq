@@ -112,8 +112,9 @@ func TestRunTurnExecutesToolCallThenFinalAnswer(t *testing.T) {
 	}
 	log := string(logData)
 	// Section headers carry a "(YYYY-MM-DD HH:MM:SS)" timestamp appended by
-	// ui.Writer, so match around it instead of an exact string.
-	timestamp := `\(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\)`
+	// ui.Writer (followed by a " | ctx ..." usage readout), so match around
+	// both instead of an exact string.
+	timestamp := `\(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\)( \| ctx [^\n]*)?`
 	if !regexp.MustCompile(`Tool call ` + timestamp + `\necho\(\{"text":"hi"\}\)`).MatchString(log) {
 		t.Errorf("expected tool call section header + call to be logged, got: %s", log)
 	}
@@ -503,5 +504,66 @@ func TestSumUsageKeepsEstimatedFlags(t *testing.T) {
 	got := sumUsage(llm.Usage{HasTiming: true}, llm.Usage{HasTiming: true, Estimated: true, CompletionEstimated: true})
 	if !got.Estimated || !got.CompletionEstimated {
 		t.Errorf("expected estimated flags to survive summing, got %+v", got)
+	}
+}
+
+func TestContextStatusEstimatesWithoutProviderUsage(t *testing.T) {
+	a, _, _ := newTestAgent(t, nil)
+	a.ContextSize = 1000
+	a.sysChars = 400
+	a.History = []llm.Message{{Role: llm.RoleUser, Content: strings.Repeat("x", 400)}}
+
+	cs := a.ContextStatus()
+	if cs.Used != 200 || cs.Total != 1000 || !cs.Estimated || cs.Left() != 800 {
+		t.Errorf("unexpected status: %+v", cs)
+	}
+}
+
+func TestContextStatusUsesRealPromptTokensPlusEstimatedDelta(t *testing.T) {
+	a, _, _ := newTestAgent(t, nil)
+	a.ContextSize = 1000
+	a.sysChars = 400
+	a.History = []llm.Message{{Role: llm.RoleUser, Content: strings.Repeat("x", 400)}}
+	a.realPromptTokens = 300
+	a.realBaseChars = 800 // nothing added since the request
+
+	if cs := a.ContextStatus(); cs.Used != 300 || cs.Estimated {
+		t.Errorf("expected exact real figure, got %+v", cs)
+	}
+	a.History = append(a.History, llm.Message{Role: llm.RoleTool, Content: strings.Repeat("y", 80)})
+	if cs := a.ContextStatus(); cs.Used != 320 || !cs.Estimated {
+		t.Errorf("expected real base + 80/4 estimated tokens, got %+v", cs)
+	}
+}
+
+func TestContextTrackingResetsOnResetHistory(t *testing.T) {
+	a, _, _ := newTestAgent(t, nil)
+	a.realPromptTokens = 500
+	a.ResetHistory()
+	if a.realPromptTokens != 0 {
+		t.Errorf("expected stale real prompt size to be dropped, got %d", a.realPromptTokens)
+	}
+}
+
+func TestRunTurnShowsContextInHeadersAndMetrics(t *testing.T) {
+	responses := [][]llm.ChatEvent{
+		{
+			{Kind: llm.EventContent, Delta: "hello"},
+			{Kind: llm.EventDone, Usage: llm.Usage{PromptTokens: 700, CompletionTokens: 50, TotalTokens: 750}},
+		},
+	}
+	a, _, outFile := newTestAgent(t, responses)
+	a.ContextSize = 1000
+	if err := a.RunTurn(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(outFile)
+	log := string(data)
+	if !regexp.MustCompile(`Answer \([^)]*\) \| ctx ~\d+/1,000 \(~\d+%\) left ~\d+`).MatchString(log) {
+		t.Errorf("expected an estimated ctx readout on the Answer header, got: %s", log)
+	}
+	// Final readout is exact: 700 prompt + 50 completion tokens.
+	if !strings.Contains(log, "| ctx 750/1,000 (75%) left 250]") {
+		t.Errorf("expected exact end-of-turn ctx readout, got: %s", log)
 	}
 }

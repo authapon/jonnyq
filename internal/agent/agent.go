@@ -112,6 +112,16 @@ type Agent struct {
 	// usage" must track that separately.
 	LastUsage       llm.Usage
 	LastTurnElapsed time.Duration
+
+	// Context tracking for ContextStatus. realPromptTokens is the provider's
+	// reported prompt size for the most recent request (0 when unknown or
+	// invalidated by compaction/reset); realBaseChars is how many characters
+	// (system message + history) that request contained, so text added
+	// since can be estimated on top. sysChars is the current system
+	// message's length.
+	realPromptTokens int
+	realBaseChars    int
+	sysChars         int
 }
 
 // decisiveThinkingPrompt is included in every system message, regardless of
@@ -144,7 +154,7 @@ You are working through a task checklist with no human reviewing each step befor
 `
 
 func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool, contextSize, maxToolCallsPerTurn int, w *ui.Writer, skillPaths []string) *Agent {
-	return &Agent{
+	ag := &Agent{
 		Provider:            provider,
 		Model:               model,
 		Thinking:            thinking,
@@ -155,6 +165,56 @@ func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool
 		UI:                  w,
 		ToolCallMode:        ToolCallModeNative,
 	}
+	// Section headers (Thinking / Tool call / Answer) show live context use.
+	if w != nil {
+		w.ContextFn = ag.ContextStatus
+	}
+	return ag
+}
+
+// contextTotal is the context window size used for "left" figures: the
+// configured ContextSize, or the fallback when unset.
+func (a *Agent) contextTotal() int {
+	if a.ContextSize > 0 {
+		return a.ContextSize
+	}
+	return fallbackContextSize
+}
+
+// ContextStatus reports how much of the context window the conversation
+// currently occupies. When the provider reported the last request's prompt
+// size, that real figure is the base and only text added since (the reply,
+// tool results) is estimated at approxCharsPerToken on top; otherwise the
+// whole system message + history is estimated. Estimated is set whenever any
+// approximation is involved.
+func (a *Agent) ContextStatus() ui.ContextStatus {
+	chars := a.sysChars + a.historyChars()
+	cs := ui.ContextStatus{Total: a.contextTotal(), Estimated: true}
+	if a.realPromptTokens > 0 {
+		delta := chars - a.realBaseChars
+		if delta < 0 {
+			delta = 0
+		}
+		cs.Used = a.realPromptTokens + delta/approxCharsPerToken
+		cs.Estimated = delta > 0
+		return cs
+	}
+	cs.Used = chars / approxCharsPerToken
+	return cs
+}
+
+// finalContextStatus is the context size after a turn: the last request's
+// real prompt tokens plus the reply's real completion tokens when the
+// provider reported them, else ContextStatus's estimate.
+func (a *Agent) finalContextStatus(last llm.Usage) ui.ContextStatus {
+	if last.PromptTokens > 0 {
+		return ui.ContextStatus{
+			Used:      last.PromptTokens + last.CompletionTokens,
+			Total:     a.contextTotal(),
+			Estimated: last.CompletionEstimated,
+		}
+	}
+	return a.ContextStatus()
 }
 
 // ResetHistory discards all conversation history, so the next RunTurn call
@@ -165,6 +225,7 @@ func New(provider llm.Provider, model string, reg *tools.Registry, thinking bool
 // read_file/run_command rather than relying on memory of past turns.
 func (a *Agent) ResetHistory() {
 	a.History = nil
+	a.realPromptTokens = 0
 }
 
 func (a *Agent) buildSystemMessage() llm.Message {
@@ -221,6 +282,7 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 	start := time.Now()
 	a.UI.NewTurn()
 	systemMsg := a.buildSystemMessage()
+	a.sysChars = len(systemMsg.Content)
 	a.History = append(a.History, llm.Message{Role: llm.RoleUser, Content: userInput})
 
 	maxToolCalls := a.MaxToolCallsPerTurn
@@ -230,9 +292,11 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 
 	var totalUsage llm.Usage
 	remainingToolBudget := maxToolCalls
+	var lastRoundUsage llm.Usage // the final request's usage, for the context readout
 
 	for {
 		messages := append([]llm.Message{systemMsg}, a.History...)
+		roundBaseChars := a.sysChars + a.historyChars()
 
 		// Each Chat call gets its own cancellable context so a detected
 		// repetition loop can abort just that in-flight request without
@@ -302,6 +366,10 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 			case llm.EventDone:
 				roundUsage = ev.Usage
 				gotDone = true
+				if ev.Usage.PromptTokens > 0 {
+					a.realPromptTokens = ev.Usage.PromptTokens
+					a.realBaseChars = roundBaseChars
+				}
 			}
 		}
 		cancelChat()
@@ -313,12 +381,14 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 				Content: "[cut short: this response started repeating the same reasoning without making progress]",
 			})
 			totalUsage = sumUsage(totalUsage, roundUsage)
+			lastRoundUsage = roundUsage
 			break
 		}
 		if !gotDone {
 			return fmt.Errorf("provider stream ended without a completion event")
 		}
 		totalUsage = sumUsage(totalUsage, roundUsage)
+		lastRoundUsage = roundUsage
 
 		// In prompt mode the provider never emits EventToolCalls (no Tools
 		// spec was sent), so a requested call instead shows up as a
@@ -405,7 +475,7 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) error {
 	}
 
 	elapsed := time.Since(start)
-	a.printMetrics(totalUsage, elapsed)
+	a.printMetrics(totalUsage, elapsed, a.finalContextStatus(lastRoundUsage))
 	a.LastUsage = totalUsage
 	a.LastTurnElapsed = elapsed
 
@@ -447,9 +517,9 @@ func (a *Agent) shouldCompact() bool {
 	return float64(a.historyChars()) > float64(a.charBudget())*compactHeadroomFraction
 }
 
-func (a *Agent) printMetrics(u llm.Usage, wallClock time.Duration) {
-	msg := fmt.Sprintf("[%s wall=%s]", FormatUsage(u), wallClock.Round(time.Millisecond))
-	a.UI.Meta(msg)
+func (a *Agent) printMetrics(u llm.Usage, wallClock time.Duration, cs ui.ContextStatus) {
+	msg := fmt.Sprintf("[%s wall=%s | %s]", FormatUsage(u), wallClock.Round(time.Millisecond), cs)
+	a.UI.MetaColored(cs.Color(), msg)
 }
 
 // FormatUsage renders u's timing/token figures the same way the terminal's
@@ -544,6 +614,7 @@ func (a *Agent) compact(ctx context.Context) {
 	// leave History close to the trigger threshold again immediately.
 	content := truncateChars("Summary of earlier conversation:\n"+summary.String(), target)
 	a.History = []llm.Message{{Role: llm.RoleSystem, Content: content}}
+	a.realPromptTokens = 0 // the old prompt size no longer describes History
 	a.UI.Meta("[context compacted]")
 }
 

@@ -97,3 +97,50 @@ func TestSectionHeaderIncludesTimestamp(t *testing.T) {
 		t.Errorf("expected the section header to include a (YYYY-MM-DD HH:MM:SS) timestamp, got: %q", log)
 	}
 }
+
+func TestSectionHeaderShowsContextWhenConfigured(t *testing.T) {
+	w, path := newTestWriter(t)
+	w.ContextFn = func() ContextStatus { return ContextStatus{Used: 6300, Total: 16348} }
+	w.Thinking("hmm")
+	w.ToolCall("x()")
+	log := readLog(t, path)
+
+	re := regexp.MustCompile(`Thinking ` + timestamp + ` \| ctx 6,300/16,348 \(38%\) left 10,048\n`)
+	if !re.MatchString(log) {
+		t.Errorf("expected ctx readout on the Thinking header, got: %q", log)
+	}
+	if !strings.Contains(log, "Tool call ") || strings.Count(log, "| ctx ") != 2 {
+		t.Errorf("expected every section header to carry the readout, got: %q", log)
+	}
+}
+
+func TestSectionHeaderUnchangedWithoutContextFn(t *testing.T) {
+	w, path := newTestWriter(t)
+	w.Answer("hi")
+	if strings.Contains(readLog(t, path), "ctx") {
+		t.Errorf("expected no ctx readout without ContextFn")
+	}
+}
+
+func TestContextStatusFormattingAndColors(t *testing.T) {
+	cs := ContextStatus{Used: 1234567, Total: 2000000}
+	if got := cs.String(); got != "ctx 1,234,567/2,000,000 (61%) left 765,433" {
+		t.Errorf("unexpected format: %q", got)
+	}
+	if got := (ContextStatus{Used: 10, Total: 100, Estimated: true}).String(); got != "ctx ~10/100 (~10%) left ~90" {
+		t.Errorf("unexpected estimated format: %q", got)
+	}
+	over := ContextStatus{Used: 150, Total: 100}
+	if over.Left() != 0 {
+		t.Errorf("Left must not go negative, got %d", over.Left())
+	}
+	cases := []struct {
+		used int
+		want string
+	}{{10, ColorGray}, {59, ColorGray}, {60, ColorYellow}, {84, ColorYellow}, {85, ColorRed}, {150, ColorRed}}
+	for _, c := range cases {
+		if got := (ContextStatus{Used: c.used, Total: 100}).Color(); got != c.want {
+			t.Errorf("used=%d: color %q, want %q", c.used, got, c.want)
+		}
+	}
+}
