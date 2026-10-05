@@ -35,6 +35,7 @@ const helpText = `Slash commands:
   /plan                             generate/reconcile .progress from requirements.md, checked against the codebase (no coding)
   /plan_for_human                   like /plan, but designed so a person can verify each phase by using the app; sends the how-to-verify guide via ntfy
   /coding                           work on the next unfinished task in .progress, then stop (Ctrl-C cancels)
+  /coding_phase [<phase number>]    work through the next unfinished phase of .progress (or the given phase) in one run, then stop and notify how to verify it (Ctrl-C cancels)
   /autocoding                       plan if needed, then work through every task in .progress in one run (Ctrl-C cancels)
   /watchfile [<word>|off]           watch the working directory for a magic word (default "AI!") and act on it when found
   /ntfy [<topic url>|off]           set/clear the ntfy.sh topic URL for /plan and /coding completion notifications (incl. the /plan_for_human verification guide) and error alerts
@@ -339,6 +340,13 @@ func (r *REPL) handleSlash(ctx context.Context, line string, watchTriggers chan<
 			return false, nil
 		}
 		return false, coding.RunOneTask(ctx, r.Agent, r.UI, ".", notify.New(r.Cfg.NtfyURL))
+
+	case "/coding_phase":
+		if r.Cfg.Model == "" {
+			r.UI.Plainln("no model set; use /model <name> first")
+			return false, nil
+		}
+		return false, coding.CodingPhase(ctx, r.Agent, r.UI, ".", rest, notify.New(r.Cfg.NtfyURL))
 
 	case "/autocoding":
 		if r.Cfg.Model == "" {

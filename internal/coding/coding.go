@@ -633,41 +633,71 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string,
 	ag.CodingMode = true
 	defer func() { ag.CodingMode = false }()
 
+	ranTurn, err := runTaskLoop(ctx, ag, w, workDir, "autocoding", func() ([]task, task, bool, error) {
+		tasks, err := parseProgress(progPath)
+		if err != nil {
+			return nil, task{}, false, fmt.Errorf("reading %s: %w", progressFile, err)
+		}
+		next, ok := firstUnfinished(tasks)
+		return tasks, next, ok, nil
+	})
+	if err != nil {
+		return err
+	}
+
+	tasks, _ := parseProgress(progPath)
+	w.Plainln("[autocoding] all tasks in " + progressFile + " are checked off")
+	summary := fmt.Sprintf("All tasks complete: %s", progressSummaryLine(tasks))
+	if doc, derr := parseProgressDoc(progPath); derr == nil {
+		if g := doc.guideText(); g != "" {
+			summary += "\n\n" + truncateBytes(g, notifyGuideLimit)
+		}
+	}
+	u := llm.Usage{}
+	if ranTurn {
+		u = ag.LastUsage
+	}
+	notifyOrWarn(ctx, n, w, "jonnyq: /autocoding complete", withTiming(summary, start, time.Now(), u))
+	return nil
+}
+
+// pickFunc reports the tasks that make up the current scope of a
+// runTaskLoop (all of .progress for /autocoding, one phase for
+// /coding_phase), the next unfinished task within it, and whether any
+// remain. It is re-evaluated every round because the model edits .progress
+// as it works.
+type pickFunc func() (scoped []task, next task, remaining bool, err error)
+
+// runTaskLoop is the loop shared by /autocoding and /coding_phase: while
+// pick reports unfinished work, it clears history and runs one task turn,
+// with the same safety valves in both. It returns once pick reports nothing
+// remaining (ranTurn says whether any turn ran) or on error. label only
+// prefixes the progress lines printed to the terminal. The caller owns
+// CodingMode and notifications.
+func runTaskLoop(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir, label string, pick pickFunc) (ranTurn bool, err error) {
+	progPath := filepath.Join(workDir, progressFile)
+
 	lastText := ""
 	stall := 0
 	untouched := false
 	lastDoneCount := -1
 	noProgressRounds := 0
-	ranTurn := false // whether an /autocoding task turn ran (for the final notification's stats)
 	for {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return ranTurn, ctx.Err()
 		}
-		tasks, err := parseProgress(progPath)
+		tasks, next, ok, err := pick()
 		if err != nil {
-			return fmt.Errorf("reading %s: %w", progressFile, err)
+			return ranTurn, err
 		}
-		next, ok := firstUnfinished(tasks)
 		if !ok {
-			w.Plainln("[autocoding] all tasks in " + progressFile + " are checked off")
-			summary := fmt.Sprintf("All tasks complete: %s", progressSummaryLine(tasks))
-			if doc, derr := parseProgressDoc(progPath); derr == nil {
-				if g := doc.guideText(); g != "" {
-					summary += "\n\n" + truncateBytes(g, notifyGuideLimit)
-				}
-			}
-			u := llm.Usage{}
-			if ranTurn {
-				u = ag.LastUsage
-			}
-			notifyOrWarn(ctx, n, w, "jonnyq: /autocoding complete", withTiming(summary, start, time.Now(), u))
-			return nil
+			return ranTurn, nil
 		}
 
-		// Independent of the same-task check below: if the total number of
-		// completed tasks hasn't grown in a while, nothing is actually
-		// getting finished, no matter how "next" is drifting round to
-		// round. This bounds the run even in cases the same-task counter
+		// Independent of the same-task check below: if the number of
+		// completed tasks in scope hasn't grown in a while, nothing is
+		// actually getting finished, no matter how "next" is drifting round
+		// to round. This bounds the run even in cases the same-task counter
 		// can't see.
 		doneNow := countDone(tasks)
 		if lastDoneCount == -1 {
@@ -679,14 +709,14 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string,
 		} else {
 			noProgressRounds++
 			if noProgressRounds >= maxNoProgressRounds {
-				return fmt.Errorf("no task in %s has been completed in the last %d rounds (currently on %q); aborting - check %s and requirements.md manually", progressFile, maxNoProgressRounds, next.text, progressFile)
+				return ranTurn, fmt.Errorf("no task in %s has been completed in the last %d rounds (currently on %q); aborting - check %s and requirements.md manually", progressFile, maxNoProgressRounds, next.text, progressFile)
 			}
 		}
 
 		if next.text == lastText {
 			stall++
 			if stall >= maxStallRounds {
-				return fmt.Errorf("task %q made no progress after %d attempts; check %s and requirements.md manually", next.text, maxStallRounds, progressFile)
+				return ranTurn, fmt.Errorf("task %q made no progress after %d attempts; check %s and requirements.md manually", next.text, maxStallRounds, progressFile)
 			}
 		} else {
 			lastText = next.text
@@ -694,7 +724,7 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string,
 			untouched = false
 		}
 
-		w.Plainln(fmt.Sprintf("[autocoding] working on: %s", next.text))
+		w.Plainln(fmt.Sprintf("[%s] working on: %s", label, next.text))
 		// Start each task with a clean slate: no memory of the planning
 		// step or any earlier task. The model re-discovers whatever it
 		// needs (via read_file/run_command) instead of relying on
@@ -704,7 +734,7 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string,
 		docBefore, _ := parseProgressDoc(progPath)
 		ranTurn = true
 		if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall, untouched)+humanGuideNote(docBefore)); err != nil {
-			return fmt.Errorf("working on %q: %w", next.text, err)
+			return ranTurn, fmt.Errorf("working on %q: %w", next.text, err)
 		}
 		untouched = progressUnchanged(progPath, before)
 	}
