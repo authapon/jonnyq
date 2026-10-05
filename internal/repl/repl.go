@@ -33,10 +33,11 @@ const helpText = `Slash commands:
   /run_command_timeout <seconds>    set the run_command timeout in seconds
   /prompt <file>                    read a prompt from file and send it, as if typed
   /plan                             generate/reconcile .progress from requirements.md, checked against the codebase (no coding)
+  /plan_for_human                   like /plan, but designed so a person can verify each phase by using the app; sends the how-to-verify guide via ntfy
   /coding                           work on the next unfinished task in .progress, then stop (Ctrl-C cancels)
   /autocoding                       plan if needed, then work through every task in .progress in one run (Ctrl-C cancels)
   /watchfile [<word>|off]           watch the working directory for a magic word (default "AI!") and act on it when found
-  /ntfy [<topic url>|off]           set/clear the ntfy.sh topic URL for /plan and /coding completion notifications and error alerts
+  /ntfy [<topic url>|off]           set/clear the ntfy.sh topic URL for /plan and /coding completion notifications (incl. the /plan_for_human verification guide) and error alerts
   /toolmode [native|prompt]         switch how tools are called: native tool-calling (default) or a plain-text fenced JSON block for models with unreliable native tool-calling
   /exit  /bye                       exit jonnyq
 
@@ -324,6 +325,13 @@ func (r *REPL) handleSlash(ctx context.Context, line string, watchTriggers chan<
 			return false, nil
 		}
 		return false, coding.Plan(ctx, r.Agent, r.UI, ".", notify.New(r.Cfg.NtfyURL))
+
+	case "/plan_for_human":
+		if r.Cfg.Model == "" {
+			r.UI.Plainln("no model set; use /model <name> first")
+			return false, nil
+		}
+		return false, coding.PlanForHuman(ctx, r.Agent, r.UI, ".", notify.New(r.Cfg.NtfyURL))
 
 	case "/coding":
 		if r.Cfg.Model == "" {

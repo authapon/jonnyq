@@ -279,7 +279,9 @@ func buildReconcilePrompt() string {
 			"Leave unrelated existing tasks and their checked state as-is. Keep new tasks as detailed and granular as the "+
 			"existing ones (small, independently verifiable, referencing requirement IDs in parentheses the same way the "+
 			"existing tasks do, if any), and organize them under the existing \"## Phase N: <name>\" heading they best "+
-			"fit, adding a new phase heading only if genuinely new work doesn't fit any existing phase. "+progressLanguageRule+" "+
+			"fit, adding a new phase heading only if genuinely new work doesn't fit any existing phase. Preserve any "+
+			"blockquote notes (lines starting with \"> \", e.g. \"> How to run:\" or \"> Human check:\") - they are "+
+			"notes for a human reviewer, not tasks. "+progressLanguageRule+" "+
 			"Do not implement anything yet - only update the task list.",
 		requirementsFile, progressFile, progressFile, requirementsFile, progressFile, progressFile, requirementsFile, requirementsFile,
 	)
@@ -348,9 +350,29 @@ func buildTaskPrompt(taskText string, stall int, prevUntouched bool) string {
 // ntfy notifier to post a completion summary to when real work happened
 // (generating or reconciling) - pass nil/a disabled Notifier to skip
 // notifying, as AutoRun does for its own internal Plan call.
-func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) (err error) {
+func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) error {
+	return plan(ctx, ag, w, workDir, n, false)
+}
+
+// PlanForHuman is /plan_for_human: like Plan, but the plan is designed so a
+// person can verify the result by using the application (ideally through
+// its frontend). .progress gets a "> How to run:" note and a per-phase
+// "> Human check:" note; if n is enabled, the verification guide is sent
+// through it. If .progress already exists without those notes they are added
+// without touching its tasks, and if it already has them and requirements.md
+// is unchanged the guide is simply re-sent (no model call).
+func PlanForHuman(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) error {
+	return plan(ctx, ag, w, workDir, n, true)
+}
+
+func plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier, human bool) (err error) {
 	start := time.Now()
-	defer func() { err = notifyFailure(ctx, n, w, "jonnyq: /plan failed", start, err) }()
+	cmd := "/plan"
+	if human {
+		cmd = "/plan_for_human"
+	}
+	defer func() { err = notifyFailure(ctx, n, w, "jonnyq: "+cmd+" failed", start, err) }()
+
 	reqPath := filepath.Join(workDir, requirementsFile)
 	reqData, err := os.ReadFile(reqPath)
 	if err != nil {
@@ -363,9 +385,56 @@ func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n 
 	ag.CodingMode = true
 	defer func() { ag.CodingMode = false }()
 
+	// ran records whether any model turn happened, so a notification reports
+	// real usage figures (of the last turn) or n/a, never stale ones.
+	ran := false
+	runTurn := func(prompt string) error {
+		ran = true
+		return ag.RunTurn(ctx, prompt)
+	}
+	// finish notifies with summary, plus the verification guide in human mode.
+	finish := func(summary string) {
+		if human {
+			if doc, derr := parseProgressDoc(progPath); derr == nil {
+				if g := doc.guideText(); g != "" {
+					summary += "\n\n" + truncateBytes(g, notifyGuideLimit)
+				}
+			}
+		}
+		u := llm.Usage{}
+		if ran {
+			u = ag.LastUsage
+		}
+		notifyOrWarn(ctx, n, w, "jonnyq: "+cmd+" complete", withTiming(summary, start, time.Now(), u))
+	}
+	// ensureGuide makes one attempt to add the verification notes when
+	// .progress lacks them, and returns a warning for the notification if
+	// they are still missing afterwards.
+	ensureGuide := func() (string, error) {
+		if !human {
+			return "", nil
+		}
+		if doc, derr := parseProgressDoc(progPath); derr == nil && doc.hasGuide() {
+			return "", nil
+		}
+		w.Plainln("[plan_for_human] adding human verification notes to " + progressFile)
+		if err := runTurn(buildAddChecksPrompt()); err != nil {
+			return "", fmt.Errorf("adding human verification notes to %s: %w", progressFile, err)
+		}
+		if doc, derr := parseProgressDoc(progPath); derr == nil && doc.hasGuide() {
+			return "", nil
+		}
+		return "\n\nWARNING: the model did not write the \"> How to run:\" / \"> Human check:\" notes, so " +
+			progressFile + " has no verification guide yet. Run /plan_for_human again or add them by hand.", nil
+	}
+
 	if _, err := os.Stat(progPath); err != nil {
 		w.Plainln("[plan] no " + progressFile + " found, generating task list from " + requirementsFile)
-		if err := ag.RunTurn(ctx, buildGeneratePrompt()); err != nil {
+		prompt := buildGeneratePrompt()
+		if human {
+			prompt = buildGenerateForHumanPrompt()
+		}
+		if err := runTurn(prompt); err != nil {
 			return fmt.Errorf("generating %s: %w", progressFile, err)
 		}
 		tasks, err := parseProgress(progPath)
@@ -375,30 +444,60 @@ func Plan(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n 
 		if err := writeStoredHash(hashPath, currentHash); err != nil {
 			return fmt.Errorf("recording requirements hash: %w", err)
 		}
-		summary := fmt.Sprintf("Generated %s from %s: %s", progressFile, requirementsFile, progressSummaryLine(tasks))
-		notifyOrWarn(ctx, n, w, "jonnyq: /plan complete", withTiming(summary, start, time.Now(), ag.LastUsage))
+		warn, err := ensureGuide()
+		if err != nil {
+			return err
+		}
+		tasks, _ = parseProgress(progPath)
+		finish(fmt.Sprintf("Generated %s from %s: %s", progressFile, requirementsFile, progressSummaryLine(tasks)) + warn)
 		return nil
 	}
 
 	if readStoredHash(hashPath) == currentHash {
-		w.Plainln("[plan] " + progressFile + " is already up to date with " + requirementsFile)
+		if !human {
+			w.Plainln("[plan] " + progressFile + " is already up to date with " + requirementsFile)
+			return nil
+		}
+		w.Plainln("[plan_for_human] " + progressFile + " is already up to date with " + requirementsFile)
+		hadGuide := false
+		if doc, derr := parseProgressDoc(progPath); derr == nil {
+			hadGuide = doc.hasGuide()
+		}
+		warn, err := ensureGuide()
+		if err != nil {
+			return err
+		}
+		tasks, _ := parseProgress(progPath)
+		what := "Added human verification notes to"
+		if hadGuide {
+			what = "Re-sending the verification guide from"
+		}
+		finish(fmt.Sprintf("%s %s: %s", what, progressFile, progressSummaryLine(tasks)) + warn)
 		return nil
 	}
 
 	tasksBefore, _ := parseProgress(progPath)
 	w.Plainln("[plan] " + requirementsFile + " changed since " + progressFile + " was last updated; reconciling")
-	if err := ag.RunTurn(ctx, buildReconcilePrompt()); err != nil {
+	prompt := buildReconcilePrompt()
+	if human {
+		prompt = buildReconcileForHumanPrompt()
+	}
+	if err := runTurn(prompt); err != nil {
 		return fmt.Errorf("reconciling %s: %w", progressFile, err)
 	}
 	if err := writeStoredHash(hashPath, currentHash); err != nil {
 		return fmt.Errorf("recording requirements hash: %w", err)
+	}
+	warn, err := ensureGuide()
+	if err != nil {
+		return err
 	}
 	tasksAfter, _ := parseProgress(progPath)
 	summary := fmt.Sprintf(
 		"Reconciled %s against %s: %d tasks total (was %d), %s",
 		progressFile, requirementsFile, len(tasksAfter), len(tasksBefore), progressSummaryLine(tasksAfter),
 	)
-	notifyOrWarn(ctx, n, w, "jonnyq: /plan complete", withTiming(summary, start, time.Now(), ag.LastUsage))
+	finish(summary + warn)
 	return nil
 }
 
@@ -424,6 +523,11 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 	if !ok {
 		w.Plainln("[coding] all tasks in " + progressFile + " are checked off")
 		summary := fmt.Sprintf("All tasks already complete: %s", progressSummaryLine(tasks))
+		if doc, derr := parseProgressDoc(progPath); derr == nil {
+			if g := doc.guideText(); g != "" {
+				summary += "\n\n" + truncateBytes(g, notifyGuideLimit)
+			}
+		}
 		// No RunTurn call happened, so there's no fresh LastUsage to report
 		// - a zero-value llm.Usage renders as "n/a" rather than stale
 		// figures from an unrelated earlier turn.
@@ -445,7 +549,9 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 
 	w.Plainln(fmt.Sprintf("[coding] working on: %s", next.text))
 	before, _ := os.ReadFile(progPath)
-	if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall, prevUntouched)); err != nil {
+	docBefore, _ := parseProgressDoc(progPath)
+	phaseIdx := docBefore.firstIncompletePhase()
+	if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall, prevUntouched)+humanGuideNote(docBefore)); err != nil {
 		return fmt.Errorf("working on %q: %w", next.text, err)
 	}
 
@@ -479,16 +585,42 @@ func RunOneTask(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir stri
 	}
 	clearRetryState(retryPath)
 	summary := fmt.Sprintf("Completed: %q\n%s", next.text, progressSummaryLine(tasksAfter))
-	notifyOrWarn(ctx, n, w, "jonnyq: /coding complete", withTiming(summary, start, time.Now(), ag.LastUsage))
+	title := "jonnyq: /coding complete"
+	if extra, kind := completionGuide(progPath, phaseIdx, tasksAfter); extra != "" {
+		summary += "\n\n" + truncateBytes(extra, notifyGuideLimit)
+		title = "jonnyq: /coding " + kind + " complete"
+	}
+	notifyOrWarn(ctx, n, w, title, withTiming(summary, start, time.Now(), ag.LastUsage))
 	return nil
+}
+
+// completionGuide returns the human-verification text to include in a
+// /coding completion notification, and a title word for it: the whole
+// guide once every task is done ("all tasks"), or just the finished
+// phase's check when that task completed phase phaseIdx ("phase"). Empty
+// when .progress carries no verification guide or neither applies.
+func completionGuide(progPath string, phaseIdx int, tasksAfter []task) (text, kind string) {
+	doc, err := parseProgressDoc(progPath)
+	if err != nil || !doc.hasGuide() {
+		return "", ""
+	}
+	if _, anyLeft := firstUnfinished(tasksAfter); !anyLeft {
+		return doc.guideText(), "all tasks"
+	}
+	if phaseIdx >= 0 && phaseIdx < len(doc.phases) && doc.phases[phaseIdx].complete() && doc.phases[phaseIdx].check != "" {
+		return doc.phaseGuideText(phaseIdx), "phase"
+	}
+	return "", ""
 }
 
 // AutoRun is /autocoding: the original /coding behavior, kept under a new
 // name. It plans (as Plan does) if needed, then works through every
 // unfinished task in .progress in one run instead of stopping after each.
-// It doesn't notify on success (its internal Plan call passes a disabled
-// notifier, otherwise every task would ping), but if n is enabled it does
-// notify when the run aborts with an error, with the reason.
+// It doesn't notify per task (its internal Plan call passes a disabled
+// notifier, otherwise every task would ping). If n is enabled it sends one
+// notification when every task is done (with the human verification guide,
+// if .progress has one) and one when the run aborts with an error, with the
+// reason.
 func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string, n *notify.Notifier) (err error) {
 	start := time.Now()
 	defer func() { err = notifyFailure(ctx, n, w, "jonnyq: /autocoding failed", start, err) }()
@@ -506,6 +638,7 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string,
 	untouched := false
 	lastDoneCount := -1
 	noProgressRounds := 0
+	ranTurn := false // whether an /autocoding task turn ran (for the final notification's stats)
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -517,6 +650,17 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string,
 		next, ok := firstUnfinished(tasks)
 		if !ok {
 			w.Plainln("[autocoding] all tasks in " + progressFile + " are checked off")
+			summary := fmt.Sprintf("All tasks complete: %s", progressSummaryLine(tasks))
+			if doc, derr := parseProgressDoc(progPath); derr == nil {
+				if g := doc.guideText(); g != "" {
+					summary += "\n\n" + truncateBytes(g, notifyGuideLimit)
+				}
+			}
+			u := llm.Usage{}
+			if ranTurn {
+				u = ag.LastUsage
+			}
+			notifyOrWarn(ctx, n, w, "jonnyq: /autocoding complete", withTiming(summary, start, time.Now(), u))
 			return nil
 		}
 
@@ -557,7 +701,9 @@ func AutoRun(ctx context.Context, ag *agent.Agent, w *ui.Writer, workDir string,
 		// conversation history that keeps growing across the whole run.
 		ag.ResetHistory()
 		before, _ := os.ReadFile(progPath)
-		if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall, untouched)); err != nil {
+		docBefore, _ := parseProgressDoc(progPath)
+		ranTurn = true
+		if err := ag.RunTurn(ctx, buildTaskPrompt(next.text, stall, untouched)+humanGuideNote(docBefore)); err != nil {
 			return fmt.Errorf("working on %q: %w", next.text, err)
 		}
 		untouched = progressUnchanged(progPath, before)
